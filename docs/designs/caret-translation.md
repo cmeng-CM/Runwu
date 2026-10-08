@@ -81,7 +81,7 @@ flowchart LR
 | D-07 | 沿用覆盖，使用中处理兼容问题 | 用户 | 不阻塞于应用名单 |
 | D-08 | 中英对应，位置不等待翻译 | 用户 | 请求/会话身份校验 |
 | D-09 | 系统框架、独立协议实现 | agent | 不引入第三方依赖或复制 GPL |
-| D-10 | 独立 Runwu 应用身份、本地签名 | agent | 避免原 Pico 安装/更新冲突 |
+| D-10 | 润物安装名称、com.comeg.runwu 独立身份、本地签名 | 用户 | 用户 2026-10-08 明确指定名称与 Bundle ID；避免原 Pico 安装/更新冲突 |
 
 ## 接口与数据形状
 
@@ -98,4 +98,4 @@ flowchart LR
 
 ## 兼容迁移与回滚
 
-内部保留 Pico Swift target；输出 Runwu.app，Bundle ID com.cmeng.runwu、独立钥匙串服务，不迁移原 Pico 配置。禁止从 Pico 上游自动替换本地构建。跟随为默认新增模式，保留固定模式。回退当前仓库提交即可，不影响原 Pico 安装。
+内部保留 Pico Swift target、Runwu 可执行文件；安装及显示名为润物，输出 润物.app，Bundle ID com.comeg.runwu、独立钥匙串服务，不迁移原 Pico 配置。禁止从 Pico 上游自动替换本地构建。跟随为默认新增模式，保留固定模式。回退当前仓库提交即可，不影响原 Pico 安装。
