@@ -32,7 +32,8 @@ public struct InputSessionID: Hashable, Sendable {
 @MainActor final class InputCoordinator {
     private let logger = Logger(subsystem: "com.comeg.runwu", category: "pipeline")
     private let extractor = SentenceExtractor(), detector = LanguageTextDetector(), debouncer = InputDebouncer()
-    private var lastSentence = "", session: InputSessionID?
+    private var lastSentence = "", lastSentenceKey = "", session: InputSessionID?
+    private var observedSentence: ExtractedSentence?
     var isEnabled = true
     var sourceLanguage: Language = .chinese
     var excludedBundleIDs: Set<String> = []
@@ -68,13 +69,17 @@ public struct InputSessionID: Hashable, Sendable {
         }
         if let previous = self.session, previous != session { reset() }
         self.session = session
+        observe(snapshot)
         if snapshot.isComposing {
             debouncer.cancel()
+            lastSentence = ""
+            lastSentenceKey = ""
             return
         }
         if snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             debouncer.cancel()
             lastSentence = ""
+            lastSentenceKey = ""
             onEmpty?()
             return
         }
@@ -96,18 +101,31 @@ public struct InputSessionID: Hashable, Sendable {
     func translateNow(_ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?) {
         guard isEnabled else { return }
         guard !snapshot.isComposing, !excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "") else {
+            observe(snapshot)
             debouncer.cancel()
             return
         }
         if let previous = self.session, previous != session { reset() }
         self.session = session
+        observe(snapshot)
         emit(snapshot, session: session, screen: screen, force: true)
     }
     func reset() {
         debouncer.cancel()
         session = nil
+        observedSentence = nil
         lastSentence = ""
+        lastSentenceKey = ""
         onEmpty?()
+    }
+
+    private func observe(_ snapshot: TextSnapshot) {
+        let current = snapshot.isComposing ? nil : extractor.extractSentence(from: snapshot)
+        if current != observedSentence {
+            observedSentence = current
+            lastSentence = ""
+            lastSentenceKey = ""
+        }
     }
 
     private func emit(
@@ -115,22 +133,18 @@ public struct InputSessionID: Hashable, Sendable {
     ) {
         guard isEnabled, !snapshot.isComposing, !excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "")
         else { return }
-        let sentence = extractor.extract(from: snapshot)
+        guard let extracted = extractor.extractSentence(from: snapshot) else { return }
+        let sentence = extracted.text
         DiagnosticLog.write(
             "debounce fired sentenceLength=\(sentence.count) source=\(sourceLanguage.rawValue) matches=\(detector.contains(sentence, language: sourceLanguage))")
         logger.info(
             "debounce fired sentenceLength=\(sentence.count, privacy: .public) source=\(self.sourceLanguage.rawValue, privacy: .public) matches=\(self.detector.contains(sentence, language: self.sourceLanguage), privacy: .public)"
         )
         guard !sentence.isEmpty, detector.contains(sentence, language: sourceLanguage) else { return }
-        if !force, sentence == lastSentence { return }
+        let sentenceKey = extracted.key(in: session)
+        if !force, sentence == lastSentence, sentenceKey == lastSentenceKey { return }
         lastSentence = sentence
-        let nsText = snapshot.text as NSString
-        let sentenceRange = nsText.range(of: sentence, options: .backwards)
-        // Scope the key to this input session: the first sentence in every
-        // field has an empty text prefix, and without the token those fields
-        // would all share one key and replace each other's overlay.
-        let prefix = sentenceRange.location == NSNotFound ? sentence : nsText.substring(to: sentenceRange.location)
-        let sentenceKey = "\(session.token.uuidString):\(prefix)"
+        lastSentenceKey = sentenceKey
         onSentence?(sentence, sentenceKey, session, screen, snapshot)
     }
 }
@@ -375,16 +389,25 @@ public struct InputSessionID: Hashable, Sendable {
         return "probe target=\(target.bundleID) result=text_element_found role=\(role)"
     }
 
-    func replace(sourceWithTerminator: String, translation: String) -> Bool {
+    func replace(sourceWithTerminator: String, translation: String, range: NSRange? = nil,
+        expectedSession: InputSessionID? = nil) -> Bool {
         reader.access.beginRead()
         refreshCurrentFocus()
         guard let app = application, let element = focused,
             let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
                 excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())),
-            !geometry.isComposing else { return false }
+            !geometry.isComposing, expectedSession == nil || expectedSession == session else { return false }
+        if let range {
+            guard let caret = geometry.selectedRange?.location, range.location >= 0,
+                range.length >= 0, range.length <= Int.max - range.location,
+                caret >= range.location, caret <= range.location + range.length else { return false }
+        }
+        guard currentApplication()?.pid == app.pid, reader.safe(element, pid: app.pid) else { return false }
         let current = reader.text(element)
         return FocusedFieldReplacer.replace(currentText: current, sourceWithTerminator: sourceWithTerminator,
-            translation: translation) { text, caret in
+            translation: translation, range: range) { text, caret in
+            guard currentApplication()?.pid == app.pid, expectedSession == nil || expectedSession == session,
+                reader.safe(element, pid: app.pid) else { return false }
             guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success
             else { return false }
             var range = CFRange(location: caret, length: 0)

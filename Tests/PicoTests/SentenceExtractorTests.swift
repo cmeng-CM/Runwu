@@ -11,6 +11,76 @@ final class SentenceExtractorTests: XCTestCase {
                 pid: 1, bundleIdentifier: nil, text: text, selectedRange: NSRange(location: cursor, length: 0)))
         XCTAssertEqual(result, "第二句话正在输入。")
     }
+    func testRepeatedSentenceKeepsTheActualUTF16Occurrence() throws {
+        let text = "相同句子。相同句子。"
+        let extractor = SentenceExtractor()
+        let first = try XCTUnwrap(extractor.extractSentence(from: TextSnapshot(pid: 1, bundleIdentifier: nil,
+            text: text, selectedRange: NSRange(location: 2, length: 0))))
+        let second = try XCTUnwrap(extractor.extractSentence(from: TextSnapshot(pid: 1, bundleIdentifier: nil,
+            text: text, selectedRange: NSRange(location: 7, length: 0))))
+        XCTAssertEqual(first.text, second.text)
+        XCTAssertEqual(first.range, NSRange(location: 0, length: 5))
+        XCTAssertEqual(second.range, NSRange(location: 5, length: 5))
+    }
+
+    func testUTF16CaretInsideEmojiAndCombiningGraphemesNeverSplitsThem() throws {
+        let text = "前句。👨‍👩‍👧‍👦e\u{301}中文😀。后句。"
+        let expected = "👨‍👩‍👧‍👦e\u{301}中文😀。"
+        let range = (text as NSString).range(of: expected)
+        for offset in range.location..<NSMaxRange(range) {
+            let snapshot = TextSnapshot(pid: 1, bundleIdentifier: nil, text: text,
+                selectedRange: NSRange(location: offset, length: 0))
+            let sentence = try XCTUnwrap(SentenceExtractor().extractSentence(from: snapshot))
+            // The exact boundary after the previous punctuation belongs to the
+            // completed previous sentence; interior UTF-16 offsets stay whole.
+            if offset == range.location { continue }
+            XCTAssertEqual(sentence.text, expected, "UTF16 offset \(offset)")
+            XCTAssertEqual(sentence.range, range)
+            XCTAssertEqual((text as NSString).substring(with: sentence.range), sentence.text)
+        }
+    }
+
+    func testTrimmingAndLengthCapAdjustTheReturnedUTF16Range() throws {
+        let text = "先前。  中文😀测试。  "
+        let snapshot = TextSnapshot(pid: 1, bundleIdentifier: nil, text: text,
+            selectedRange: NSRange(location: 9, length: 0))
+        let sentence = try XCTUnwrap(SentenceExtractor().extractSentence(from: snapshot, maxLength: 4))
+        XCTAssertEqual(sentence.text, "😀测试。")
+        XCTAssertEqual(sentence.range, (text as NSString).range(of: "😀测试。"))
+        XCTAssertEqual((text as NSString).substring(with: sentence.range), sentence.text)
+        XCTAssertNil(SentenceExtractor().extractSentence(from: snapshot, maxLength: 0))
+    }
+
+    func testMiddleEditingReturnsTheCurrentSentenceRatherThanTrailingText() throws {
+        let text = "第一句。中间修改后的句子。最后一句。"
+        let snapshot = TextSnapshot(pid: 1, bundleIdentifier: nil, text: text,
+            selectedRange: NSRange(location: 8, length: 0))
+        let sentence = try XCTUnwrap(SentenceExtractor().extractSentence(from: snapshot))
+        XCTAssertEqual(sentence.text, "中间修改后的句子。")
+        XCTAssertEqual(sentence.range, (text as NSString).range(of: sentence.text))
+    }
+
+    func testRangeBasedReplacementTargetsFirstRepeatedSentenceAndRejectsStaleRange() throws {
+        let text = "重复😀。重复😀。"
+        let source = "重复😀。"
+        let first = NSRange(location: 0, length: source.utf16.count)
+        let plan = try XCTUnwrap(FieldReplacement.evaluate(fieldText: text, source: source, range: first))
+        XCTAssertEqual(plan.prefix, "")
+        XCTAssertEqual(plan.suffix, source)
+        XCTAssertEqual(plan.range, first)
+        let applied = FieldReplacement.replacing(fieldText: text, sourceWithTerminator: source,
+            translation: "First.", range: plan.range)
+        XCTAssertEqual(applied?.text, "First." + source)
+        XCTAssertEqual(applied?.caretUTF16Offset, "First.".utf16.count)
+        XCTAssertFalse(FocusedFieldReplacer.replace(currentText: "修改了。" + source,
+            sourceWithTerminator: source, translation: "Wrong.", range: first) { _, _ in
+                XCTFail("A stale range must never write to the later matching sentence")
+                return true
+            })
+        XCTAssertNil(FieldReplacement.replacing(fieldText: text, sourceWithTerminator: source,
+            translation: "Wrong.", range: NSRange(location: NSNotFound, length: 1)))
+    }
+
     func testChineseDetector() {
         XCTAssertTrue(ChineseTextDetector().containsChinese("Hello，我今天有点忙"))
         XCTAssertFalse(ChineseTextDetector().containsChinese("Hello"))

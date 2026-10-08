@@ -83,6 +83,7 @@ struct MenuBarMenu: View {
     let llmRouter: LLMModelRouter
     let translationService: TranslationService
     let coordinator: TranslationCoordinator
+    let clipboardCoordinator: TranslationCoordinator
     let translationHolder: TranslationSessionHolder
     let history: TranslationHistoryController
     let overlay = OverlayCoordinator()
@@ -91,7 +92,10 @@ struct MenuBarMenu: View {
     let autoUpdater: AutoUpdateController
     private let speechPolicy = SpeechPolicyEvaluator()
     private let hotKey = GlobalHotKey.shared
-    private var currentSession: InputSessionID?
+    private let realtime = RealtimeTranslationState()
+    private var configurationGeneration: UInt64 = 0
+    private var clipboardRequestID: UUID?
+    private var pendingOrigin: OverlayOrigin?
     private var pendingAction: PendingTranslationAction?
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -100,11 +104,11 @@ struct MenuBarMenu: View {
     private var reauthDismissedThisSession = false
     private let permissionWatchdog = AccessibilityPermissionWatchdog()
     private var translationHostWindow: TranslationHostWindowController?
-    init() {
-        let store = SettingsStore()
+    init(settings store: SettingsStore = SettingsStore(), translationEngine: (any TranslationEngine)? = nil,
+        historyDatabaseURL: URL? = nil, startRuntime: Bool = true) {
         let enabledValue = store.enabled
-        let trustedValue = AXIsProcessTrusted()
-        let welcomeValue = !UserDefaults.standard.bool(forKey: "onboardingComplete")
+        let trustedValue = startRuntime && AXIsProcessTrusted()
+        let welcomeValue = startRuntime && !UserDefaults.standard.bool(forKey: "onboardingComplete")
         let holder = TranslationSessionHolder()
         let router = LLMModelRouter(models: store.llmModels, timeoutSeconds: store.llmFallbackTimeout)
         let service = TranslationService(
@@ -113,7 +117,7 @@ struct MenuBarMenu: View {
             backend: store.translationBackend,
             models: store.llmModels,
             timeoutSeconds: store.llmFallbackTimeout)
-        let historyController = TranslationHistoryController()
+        let historyController = TranslationHistoryController(databaseURL: historyDatabaseURL)
         settings = store
         autoUpdater = AutoUpdateController(settings: store)
         enabled = enabledValue
@@ -123,7 +127,9 @@ struct MenuBarMenu: View {
         llmRouter = router
         translationService = service
         coordinator = TranslationCoordinator(
-            engine: service, sourceLanguage: store.sourceLanguage, targetLanguage: store.targetLanguage)
+            engine: translationEngine ?? service, sourceLanguage: store.sourceLanguage, targetLanguage: store.targetLanguage)
+        clipboardCoordinator = TranslationCoordinator(
+            engine: translationEngine ?? service, sourceLanguage: store.sourceLanguage, targetLanguage: store.targetLanguage)
         history = historyController
         speech = SpeechService()
         NSLog("Runwu startup trusted=%@ enabled=%@", String(trustedValue), String(enabledValue))
@@ -143,9 +149,16 @@ struct MenuBarMenu: View {
         overlay.theme = settings.overlayTheme
         overlay.surface = settings.overlaySurface
         monitor.onSnapshot = { [weak self] snapshot, session, screen in
-            self?.input.handle(snapshot, session: session, screen: screen)
+            self?.handleInputSnapshot(snapshot, session: session, screen: screen)
         }
-        monitor.onFocusChanged = { [weak self] in self?.input.reset() }
+        monitor.onAnchorChanged = { [weak self] anchor, session in
+            guard let self, self.realtime.updateAnchor(anchor, session: session) else { return }
+            self.overlay.updateAnchor(anchor, session: session)
+        }
+        monitor.onFocusChanged = { [weak self] in
+            self?.invalidateRealtime(clearAnchor: true)
+            self?.input.reset()
+        }
         input.excludedBundleIDs = settings.excludedBundleIDs
         monitor.excludedBundleIDs = settings.excludedBundleIDs
         monitor.sourceLanguage = settings.sourceLanguage
@@ -162,12 +175,9 @@ struct MenuBarMenu: View {
             self?.translate(text, sentenceKey: sentenceKey, session: session, screen: screen, snapshot: snapshot)
         }
         input.onEmpty = { [weak self] in
-            self?.clearPendingAction()
-            // 焦点变化/输入清空走这里：只清未钉住的卡，钉住的随显式关闭消失
-            self?.overlay.hideUnpinned()
-            self?.speech.stop()
-            Task { await self?.coordinator.cancel() }
+            self?.invalidateRealtime()
         }
+        guard startRuntime else { return }
         if permissionGranted && enabled {
             monitor.start()
             DiagnosticLog.write("accessibility monitor started")
@@ -192,6 +202,8 @@ struct MenuBarMenu: View {
         permissionWatchdog.onLost = { [weak self] in
             guard let self else { return }
             permissionGranted = false
+            invalidateRealtime(clearAnchor: true)
+            monitor.stop()
             DiagnosticLog.write("accessibility permission lost")
             logger.info("accessibility permission lost")
         }
@@ -276,20 +288,26 @@ struct MenuBarMenu: View {
         let backend = settings.translationBackend
         let timeout = settings.llmFallbackTimeout
         let models = settings.llmModels
+        configurationGeneration &+= 1
+        clipboardRequestID = nil
+        invalidateRealtime(clearAnchor: true)
         input.setSourceLanguage(source)
         monitor.sourceLanguage = source
         translationHolder.configure(source: source, target: target)
-        currentSession = nil
         clearPendingAction()
         overlay.hideUnpinned()
         speech.stop()
         let coordinator = coordinator
+        let clipboardCoordinator = clipboardCoordinator
         let service = translationService
         Task {
             await coordinator.cancel()
+            await clipboardCoordinator.cancel()
             await coordinator.setDirection(from: source, to: target)
+            await clipboardCoordinator.setDirection(from: source, to: target)
             await service.configure(backend: backend, models: models, timeoutSeconds: timeout)
             await coordinator.clearCache()
+            await clipboardCoordinator.clearCache()
         }
     }
     func toggle() {
@@ -302,11 +320,14 @@ struct MenuBarMenu: View {
             refreshHotKeys()
             maybePresentReauth()
         } else {
+            configurationGeneration &+= 1
+            clipboardRequestID = nil
+            invalidateRealtime(clearAnchor: true)
             input.reset()
             monitor.stop()
             clearPendingAction()
             refreshHotKeys()
-            Task { await coordinator.cancel() }
+            Task { await coordinator.cancel(); await clipboardCoordinator.cancel() }
             speech.stop()
             overlay.hide()
         }
@@ -448,22 +469,45 @@ struct MenuBarMenu: View {
         window.orderFrontRegardless()
         installHealWindow = window
     }
+    private func handleInputSnapshot(_ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?,
+        feedInput: Bool = true) {
+        if realtime.update(snapshot, session: session, language: settings.sourceLanguage) {
+            clearRealtimePresentation()
+        }
+        if feedInput { input.handle(snapshot, session: session, screen: screen) }
+    }
+    private func invalidateRealtime(clearAnchor: Bool = false) {
+        realtime.invalidate(clearAnchor: clearAnchor)
+        clearRealtimePresentation()
+    }
+    private func clearRealtimePresentation() {
+        if case .realtime = pendingOrigin { clearPendingAction() }
+        overlay.hideRealtime()
+        speech.stop()
+        let mutation = realtime.mutationID
+        let coordinator = coordinator
+        Task { [weak self] in
+            guard self?.realtime.mutationID == mutation else { return }
+            await coordinator.cancel()
+        }
+    }
+
     private func translate(
         _ text: String, sentenceKey: String, session: InputSessionID, screen: NSScreen?, snapshot: TextSnapshot
     ) {
         let sourceLanguage = settings.sourceLanguage
         let targetLanguage = settings.targetLanguage
-        currentSession = session
+        guard let request = realtime.beginRequest(text: text, key: sentenceKey, session: session) else { return }
+        let configuration = configurationGeneration
         let previous = pendingAction
         let sameSentence = previous?.sentenceKey == sentenceKey && previous?.session == session
-        var sourceWithTerminator: String?
-        if settings.replaceOriginal {
-            sourceWithTerminator = FieldReplacement.evaluate(fieldText: snapshot.text, source: text)?
-                .sourceWithTerminator
-        }
+        let replacement = settings.replaceOriginal
+            ? FieldReplacement.evaluate(fieldText: snapshot.text, source: text, range: request.sentence.range) : nil
+        pendingOrigin = .realtime(session)
         pendingAction = PendingTranslationAction(
             text: nil,
-            sourceWithTerminator: sourceWithTerminator,
+            sourceWithTerminator: replacement?.sourceWithTerminator,
+            sourceRange: replacement?.range,
             session: session,
             sentenceKey: sentenceKey,
             applyReplaceWhenReady: sameSentence && previous?.applyReplaceWhenReady == true,
@@ -472,7 +516,8 @@ struct MenuBarMenu: View {
         logger.info("translation requested length=\(text.count, privacy: .public)")
         let coordinator = coordinator
         Task { [weak self, coordinator] in
-            guard let result = await coordinator.translate(text) else {
+            guard self?.realtime.accepts(request) == true, self?.configurationGeneration == configuration,
+                let result = await coordinator.translate(text, from: sourceLanguage, to: targetLanguage) else {
                 await MainActor.run {
                     DiagnosticLog.write("translation returned no result")
                     self?.logger.info("translation returned no result")
@@ -488,7 +533,9 @@ struct MenuBarMenu: View {
                     key: sentenceKey,
                     session: session,
                     screen: screen,
-                    avoid: snapshot.fieldFrame)
+                    origin: .realtime(session),
+                    configuration: configuration,
+                    liveRequest: request)
             }
         }
     }
@@ -500,10 +547,22 @@ struct MenuBarMenu: View {
         key sentenceKey: String,
         session: InputSessionID,
         screen: NSScreen?,
-        avoid: NSRect?,
+        origin: OverlayOrigin,
+        configuration: UInt64,
+        liveRequest: RealtimeTranslationState.Request? = nil,
+        clipboardRequest: UUID? = nil,
         speak: Bool = true
     ) {
-        guard currentSession == session, enabled else {
+        let current: Bool
+        switch origin {
+        case .realtime:
+            current = liveRequest.map(realtime.accepts) ?? false
+        case .clipboard:
+            current = clipboardRequest != nil && clipboardRequest == clipboardRequestID
+        case .fixed:
+            current = false
+        }
+        guard current, configuration == configurationGeneration, enabled else {
             DiagnosticLog.write("translation discarded stale session")
             logger.info("translation discarded stale session")
             return
@@ -511,9 +570,6 @@ struct MenuBarMenu: View {
         translation = result
         if pendingAction?.session == session, pendingAction?.sentenceKey == sentenceKey {
             pendingAction?.text = result
-        } else {
-            pendingAction = PendingTranslationAction(
-                text: result, sourceWithTerminator: nil, session: session, sentenceKey: sentenceKey)
         }
         history.record(
             sourceText: sourceText,
@@ -523,10 +579,17 @@ struct MenuBarMenu: View {
             retention: settings.historyRetention)
         DiagnosticLog.write("translation result accepted length=\(result.count)")
         logger.info("translation result accepted length=\(result.count, privacy: .public)")
-        overlay.show(result, key: sentenceKey, on: screen, avoid: avoid)
+        if case .realtime = origin {
+            overlay.showRealtime(source: sourceText, translation: result, key: sentenceKey,
+                session: session, anchor: realtime.anchor)
+        } else {
+            overlay.show(result, key: sentenceKey, on: screen, origin: .clipboard)
+        }
         if speak { speakIfAllowed(result) }
-        if pendingAction?.applyReplaceWhenReady == true { applyPendingReplace() }
-        if pendingAction?.applyCopyWhenReady == true { applyPendingCopy() }
+        if pendingAction?.session == session, pendingAction?.sentenceKey == sentenceKey {
+            if pendingAction?.applyReplaceWhenReady == true { applyPendingReplace() }
+            if pendingAction?.applyCopyWhenReady == true { applyPendingCopy() }
+        }
     }
     private func speakIfAllowed(_ text: String) {
         guard speechPolicy.shouldSpeak(
@@ -670,34 +733,31 @@ struct MenuBarMenu: View {
         // 译文才能保持分段可读。
         text = TextParagraphing.restoreParagraphBreaks(text)
         let session = InputSessionID(pid: ProcessInfo.processInfo.processIdentifier)
+        let requestID = UUID()
         let sentenceKey = "clipboard:\(text)"
-        currentSession = session
+        let configuration = configurationGeneration
+        let sourceLanguage = settings.sourceLanguage, targetLanguage = settings.targetLanguage
+        clipboardRequestID = requestID
+        pendingOrigin = .clipboard
         pendingAction = PendingTranslationAction(
             text: nil, sourceWithTerminator: nil, session: session, sentenceKey: sentenceKey)
         DiagnosticLog.write("clipboard translation requested length=\(text.count)")
         logger.info("clipboard translation requested length=\(text.count, privacy: .public)")
-        let coordinator = coordinator
+        let coordinator = clipboardCoordinator
         Task { [weak self, coordinator] in
-            guard let result = await coordinator.translate(text) else { return }
-            await MainActor.run {
-                guard let self else { return }
-                self.acceptTranslationResult(
-                    result,
-                    sourceText: text,
-                    sourceLanguage: self.settings.sourceLanguage,
-                    targetLanguage: self.settings.targetLanguage,
-                    key: sentenceKey,
-                    session: session,
-                    screen: NSScreen.main,
-                    avoid: nil,
-                    speak: false)
-            }
+            guard self?.clipboardRequestID == requestID, self?.configurationGeneration == configuration,
+                let result = await coordinator.translate(text, from: sourceLanguage, to: targetLanguage) else { return }
+            self?.acceptTranslationResult(result, sourceText: text, sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage, key: sentenceKey, session: session,
+                screen: NSScreen.main, origin: .clipboard, configuration: configuration,
+                clipboardRequest: requestID, speak: false)
         }
     }
 
     private func handleTranslateHotKey() {
         guard enabled, settings.translationTiming == .shortcut else { return }
         guard let captured = monitor.snapshotNow() else { return }
+        handleInputSnapshot(captured.snapshot, session: captured.session, screen: captured.screen, feedInput: false)
         input.translateNow(captured.snapshot, session: captured.session, screen: captured.screen)
     }
 
@@ -724,8 +784,10 @@ struct MenuBarMenu: View {
         guard var pending = pendingAction, let translation = pending.text,
             let source = pending.sourceWithTerminator
         else { return }
-        if monitor.replace(sourceWithTerminator: source, translation: translation) {
+        if monitor.replace(sourceWithTerminator: source, translation: translation,
+            range: pending.sourceRange, expectedSession: pending.session) {
             pending.sourceWithTerminator = nil
+            pending.sourceRange = nil
             pending.applyReplaceWhenReady = false
             pendingAction = pending
         }
@@ -740,6 +802,7 @@ struct MenuBarMenu: View {
 
     private func clearPendingAction() {
         pendingAction = nil
+        pendingOrigin = nil
         translation = ""
     }
 
@@ -753,6 +816,7 @@ struct MenuBarMenu: View {
 private struct PendingTranslationAction {
     var text: String?
     var sourceWithTerminator: String?
+    var sourceRange: NSRange? = nil
     var session: InputSessionID
     var sentenceKey: String
     var applyReplaceWhenReady = false

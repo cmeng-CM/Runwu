@@ -262,6 +262,7 @@ struct TranslationOverlayView: View {
     var maxBodyHeight: CGFloat = .infinity
     let onClose: () -> Void
     let onCopy: () -> Void
+    var sourceText: String? = nil
     var onHoverChange: (Bool) -> Void = { _ in }
     /// Live body-height updates while the user drags the bottom handle.
     var onResize: (CGFloat) -> Void = { _ in }
@@ -290,7 +291,7 @@ struct TranslationOverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("PICO")
+                Text("润物")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .tracking(1.6)
                     .foregroundStyle(theme.accentColor)
@@ -365,12 +366,15 @@ struct TranslationOverlayView: View {
     }
 
     @ViewBuilder private var textBody: some View {
-        let bodyText = MarkdownCardBodyView(
-            text: text,
-            fontSize: fontSize,
-            accentColor: theme.accentColor)
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let bodyText = VStack(alignment: .leading, spacing: 8) {
+            if let sourceText {
+                Text(sourceText).font(.system(size: fontSize)).foregroundStyle(.secondary)
+                Divider()
+            }
+            MarkdownCardBodyView(text: text, fontSize: fontSize, accentColor: theme.accentColor)
+        }
+        .multilineTextAlignment(.leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         if let limit = effectiveLimit {
             ScrollView(.vertical) { bodyText }
                 .frame(height: limit)
@@ -448,12 +452,52 @@ final class OverlayPanel: NSPanel {
     }
 }
 
+enum OverlayOrigin: Equatable {
+    case realtime(InputSessionID)
+    case clipboard
+    case fixed
+}
+
+struct OverlayCardContent: Equatable {
+    let source: String?
+    let translation: String
+}
+
+/// Placement uses global Cocoa points and the display containing the actual
+/// anchor, including negative origins. It never invents an insertion point.
+struct OverlayFollowingLayout {
+    static func frame(size: NSSize, anchor: InputAnchor, screens: [NSRect]) -> NSRect? {
+        let candidates = [anchor.caretFrame, anchor.fieldFrame].compactMap { $0 }
+        let placement = candidates.compactMap { target -> (NSRect, NSRect)? in
+            guard InputScreenLayout.finite(target), target.width >= 0, target.height > 0,
+                let screen = screens.first(where: { $0.contains(NSPoint(x: target.midX, y: target.midY)) })
+                    ?? screens.first(where: { $0.intersects(target) }),
+                screen.width > 16, screen.height > 16 else { return nil }
+            return (target, screen)
+        }.first
+        guard let (target, screen) = placement else { return nil }
+        let margin: CGFloat = 8, gap: CGFloat = 6
+        let width = min(size.width, screen.width - margin * 2)
+        let height = min(size.height, screen.height - margin * 2)
+        let below = target.minY - gap - height
+        let proposedY = below >= screen.minY + margin ? below : target.maxY + gap
+        let x = min(max(target.minX, screen.minX + margin), screen.maxX - width - margin)
+        let y = min(max(proposedY, screen.minY + margin), screen.maxY - height - margin)
+        return NSRect(x: x, y: y, width: width, height: height)
+    }
+}
+
 @MainActor final class OverlayCoordinator {
     private final class Entry {
         let id: UUID
         let key: String
         let panel: NSPanel
         var text: String
+        var sourceText: String?
+        let origin: OverlayOrigin
+        var inputAnchor: InputAnchor?
+        var isRealtime: Bool { if case .realtime = origin { return true }; return false }
+        var detached: Bool { contentPinned || (isRealtime && isPinned) }
         var textHeightLimit: CGFloat?
         /// Set when the card scrolls: the panel height is a fixed budget
         /// instead of the (collapsed) fitting size of a scroll view.
@@ -468,20 +512,25 @@ final class OverlayPanel: NSPanel {
         var hideTask: Task<Void, Never>?
         /// Lets us detach the didMove observer when the entry goes away.
         var moveObserver: NSObjectProtocol?
-        init(id: UUID, key: String, panel: NSPanel, screen: NSScreen?, avoid: NSRect?, text: String) {
+        init(id: UUID, key: String, panel: NSPanel, screen: NSScreen?, avoid: NSRect?, text: String,
+            sourceText: String?, origin: OverlayOrigin, inputAnchor: InputAnchor?) {
             self.id = id
             self.key = key
             self.panel = panel
             self.screen = screen
             self.avoid = avoid
             self.text = text
+            self.sourceText = sourceText
+            self.origin = origin
+            self.inputAnchor = inputAnchor
         }
     }
 
     /// Debug/diagnostic hook: frames of the panels currently on screen.
-    var visiblePanelFrames: [NSRect] { entries.map { $0.panel.frame } }
+    var visiblePanelFrames: [NSRect] { entries.filter { $0.panel.isVisible }.map { $0.panel.frame } }
     /// Debug/diagnostic hook: ids of the entries currently on screen.
-    var shownEntryIDs: [UUID] { entries.map(\.id) }
+    var shownEntryIDs: [UUID] { entries.filter { $0.panel.isVisible }.map(\.id) }
+    var cardContents: [OverlayCardContent] { entries.map { OverlayCardContent(source: $0.sourceText, translation: $0.text) } }
     /// Debug/test hook: content views of the panels currently on screen, so
     /// tests can reach the drag catcher and drive its hover callbacks the way
     /// tracking-area delivery does.
@@ -494,6 +543,8 @@ final class OverlayPanel: NSPanel {
     /// True while we move panels ourselves (placement/relayout); didMove
     /// notifications arriving outside these windows are user drags.
     private var isApplyingProgrammaticFrame = false
+    var followCaret = true { didSet { if oldValue != followCaret { relayout() } } }
+    var followingScreenFrames: () -> [NSRect] = { NSScreen.screens.map(\.visibleFrame) }
     var hideAfter: Double = 4
     var neverHide = false
     /// 光标压卡时看门狗的轮询间隔（秒）：压卡期间不倒计时，但 mouseExited
@@ -546,13 +597,17 @@ final class OverlayPanel: NSPanel {
         relayout()
     }
     func show(_ text: String, on screen: NSScreen?) { show(text, key: UUID().uuidString, on: screen) }
-    func show(_ text: String, key: String, on screen: NSScreen?, avoid: NSRect? = nil) {
+    func show(_ text: String, key: String, on screen: NSScreen?, avoid: NSRect? = nil,
+        sourceText: String? = nil, origin: OverlayOrigin = .fixed, inputAnchor: InputAnchor? = nil) {
         guard !text.isEmpty else {
-            hideUnpinned()
+            if case .realtime = origin { hideRealtime() }
+            else { hideFixedUnpinned() }
             return
         }
-        if let existing = entries.first(where: { $0.key == key }) {
+        if let existing = entries.first(where: { $0.key == key && $0.origin == origin && !$0.detached }) {
             existing.text = text
+            existing.sourceText = sourceText
+            existing.inputAnchor = inputAnchor
             existing.screen = screen ?? existing.screen ?? NSScreen.main
             existing.avoid = avoid
             installContent(for: existing)
@@ -563,11 +618,12 @@ final class OverlayPanel: NSPanel {
             return
         }
         // replace 模式只顶掉未钉住的卡：钉住的卡只随显式关闭消失
-        if behavior == .replace { hideUnpinned() }
+        if case .realtime = origin { hideRealtime() }
+        else if behavior == .replace { hideFixedUnpinned() }
         // 数量上限只管未钉住的临时卡（防自动监听/堆叠模式下连续复制糊屏）；
         // 钉住的卡不设上限、永不自动移除——钉住语义=只随显式关闭消失
-        let unpinned = entries.filter { !$0.contentPinned }
-        if unpinned.count >= 3, let oldest = unpinned.first {
+        let unpinned = entries.filter { !$0.isRealtime && !$0.contentPinned }
+        if origin == .clipboard || origin == .fixed, unpinned.count >= 3, let oldest = unpinned.first {
             remove(oldest.id)
         }
         let target = screen ?? NSScreen.main
@@ -586,12 +642,15 @@ final class OverlayPanel: NSPanel {
         panel.hidesOnDeactivate = false
         panel.alphaValue = CGFloat(min(max(cardOpacity, 0.3), 1))
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let entry = Entry(id: id, key: key, panel: panel, screen: target, avoid: avoid, text: text)
+        let entry = Entry(id: id, key: key, panel: panel, screen: target, avoid: avoid, text: text,
+            sourceText: sourceText, origin: origin, inputAnchor: inputAnchor)
         entry.moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
         ) { [weak self, weak panel] _ in
-            guard let self, let panel, !self.isApplyingProgrammaticFrame else { return }
-            self.pin(id, topLeft: CGPoint(x: panel.frame.minX, y: panel.frame.maxY))
+            MainActor.assumeIsolated {
+                guard let self, let panel, !self.isApplyingProgrammaticFrame else { return }
+                self.pin(id, topLeft: CGPoint(x: panel.frame.minX, y: panel.frame.maxY))
+            }
         }
         entries.append(entry)
         installContent(for: entry)
@@ -602,7 +661,7 @@ final class OverlayPanel: NSPanel {
             self?.relayout()
         }
         isApplyingProgrammaticFrame = true
-        panel.orderFrontRegardless()
+        if !entry.isRealtime || !followCaret { panel.orderFrontRegardless() }
         isApplyingProgrammaticFrame = false
         scheduleHide(for: entry)
     }
@@ -611,9 +670,10 @@ final class OverlayPanel: NSPanel {
     /// screen budget) and installs it as the panel's content.
     private func installContent(for entry: Entry) {
         let chrome = chromeHeight()
+        let measuredText = entry.sourceText.map { $0 + "\n\n" + entry.text } ?? entry.text
         let naturalText = OverlaySizing.textHeight(
-            text: entry.text, fontSize: textSize.points,
-            width: OverlaySizing.measuredContentWidth(text: entry.text, fontSize: textSize.points))
+            text: measuredText, fontSize: textSize.points,
+            width: OverlaySizing.measuredContentWidth(text: measuredText, fontSize: textSize.points))
         let plan = OverlaySizing.plan(
             naturalCardHeight: naturalText + chrome,
             maxCardHeight: cardHeightLimit(on: entry.screen),
@@ -680,9 +740,10 @@ final class OverlayPanel: NSPanel {
                 90, (screenForEntry(id)?.visibleFrame.height ?? 900) - 120),
             onClose: { [weak self] in self?.remove(id) },
             onCopy: { [weak self] in
-                TranslationClipboard.copy(text)
+                _ = TranslationClipboard.copy(text)
                 self?.onCopyToPasteboard?(text)
             },
+            sourceText: entry?.sourceText,
             onHoverChange: { [weak self] hovering in
                 self?.setHovering(id, hovering)
             },
@@ -740,6 +801,9 @@ final class OverlayPanel: NSPanel {
         guard let entry = entries.first(where: { $0.id == id }) else { return }
         entry.contentPinned.toggle()
         if entry.contentPinned {
+            // A live card becomes history when pinned. Unpinning restores its
+            // timer, but must not attach that historical card to current input.
+            if entry.isRealtime { entry.isPinned = true }
             entry.hideTask?.cancel()
             DiagnosticLog.write("overlay pinned id=\(id.uuidString.prefix(6))")
         } else {
@@ -765,7 +829,7 @@ final class OverlayPanel: NSPanel {
     private func pin(_ id: UUID, topLeft: CGPoint) {
         guard let entry = entries.first(where: { $0.id == id }) else { return }
         entry.isPinned = true
-        anchor = topLeft
+        if !entry.isRealtime { anchor = topLeft }
     }
 
     /// 判定光标是否压在卡片上（scheduleHide 的豁免条件）；测试可注入固定值。
@@ -832,40 +896,65 @@ final class OverlayPanel: NSPanel {
         // screen.
         relayout()
     }
+    func showRealtime(source: String, translation: String, key: String, session: InputSessionID,
+        anchor: InputAnchor?) {
+        show(translation, key: key, on: screen(containing: anchor), avoid: anchor?.fieldFrame, sourceText: source,
+            origin: .realtime(session), inputAnchor: anchor)
+    }
+    func updateAnchor(_ anchor: InputAnchor, session: InputSessionID) {
+        for entry in entries where entry.origin == .realtime(session) && !entry.detached {
+            entry.inputAnchor = anchor
+            entry.screen = screen(containing: anchor) ?? entry.screen
+        }
+        relayout()
+    }
+    func hideRealtime() {
+        for id in entries.filter({ $0.isRealtime && !$0.detached }).map(\.id) { remove(id) }
+    }
+    private func hideFixedUnpinned() {
+        for id in entries.filter({ !$0.isRealtime && !$0.contentPinned }).map(\.id) { remove(id) }
+    }
+    private func screen(containing anchor: InputAnchor?) -> NSScreen? {
+        guard let rect = anchor?.caretFrame ?? anchor?.fieldFrame else { return nil }
+        return NSScreen.screens.first { $0.frame.contains(NSPoint(x: rect.midX, y: rect.midY)) }
+    }
     private func relayout() {
         isApplyingProgrammaticFrame = true
         defer { isApplyingProgrammaticFrame = false }
         var stackIndex = 0
         for entry in entries {
+            if entry.contentPinned { continue }
             entry.panel.contentView?.layoutSubtreeIfNeeded()
             let fitting = entry.panel.contentView?.fittingSize ?? entry.panel.frame.size
-            // A scrolling card's fitting height collapses to the scroll view's
-            // ideal; the planned budget is the real panel height there.
-            let size = NSSize(
-                width: fitting.width,
-                height: entry.plannedCardHeight ?? fitting.height)
+            let size = NSSize(width: fitting.width, height: entry.plannedCardHeight ?? fitting.height)
             if entry.isPinned {
-                // Keep the user-chosen top-left corner; only grow downward if
-                // the refreshed text needs a different height.
+                if entry.isRealtime { continue }
                 let old = entry.panel.frame
-                entry.panel.setFrame(
-                    NSRect(x: old.minX, y: old.maxY - size.height, width: size.width, height: size.height),
-                    display: true)
+                entry.panel.setFrame(NSRect(x: old.minX, y: old.maxY - size.height,
+                    width: size.width, height: size.height), display: true)
+                continue
+            }
+            if entry.isRealtime && followCaret {
+                if let anchor = entry.inputAnchor,
+                    let frame = OverlayFollowingLayout.frame(size: size, anchor: anchor, screens: followingScreenFrames()) {
+                    entry.panel.setFrame(frame, display: true)
+                    if !entry.panel.isVisible { entry.panel.orderFrontRegardless() }
+                } else { entry.panel.orderOut(nil) }
                 continue
             }
             if let anchor, entry.usesAnchor || (entry.slot == nil && stackIndex == 0) {
                 entry.usesAnchor = true
-                entry.panel.setFrame(
-                    Self.anchoredFrame(size: size, topLeft: anchor, on: entry.screen), display: true)
+                entry.panel.setFrame(Self.anchoredFrame(size: size, topLeft: anchor, on: entry.screen), display: true)
+                if entry.isRealtime && !entry.panel.isVisible { entry.panel.orderFrontRegardless() }
                 stackIndex += 1
                 continue
             }
             if entry.slot == nil {
                 entry.slot = resolveSlot(size: size, avoid: entry.avoid, screen: entry.screen, stackIndex: stackIndex)
             }
-            entry.panel.setFrame(
-                position(for: size, on: entry.screen, slot: entry.slot ?? position, stackIndex: stackIndex),
-                display: true)
+            entry.panel.setFrame(position(for: size, on: entry.screen, slot: entry.slot ?? position,
+                stackIndex: stackIndex), display: true)
+            if entry.isRealtime && !entry.panel.isVisible { entry.panel.orderFrontRegardless() }
             stackIndex += 1
         }
     }

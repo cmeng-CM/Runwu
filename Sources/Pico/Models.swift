@@ -86,79 +86,143 @@ public struct TextSnapshot: Sendable {
     }
 }
 
+public struct ExtractedSentence: Equatable, Sendable {
+    public let text: String
+    public let range: NSRange
+    func key(in session: InputSessionID) -> String { "\(session.token.uuidString):\(range.location)" }
+}
+
 public struct SentenceExtractor: Sendable {
     static let sentencePunctuation: Set<Character> = ["。", "？", "！", ".", "?", "!", "；", ";"]
     static let terminators: Set<Character> = sentencePunctuation.union(["\n"])
 
     public init() {}
     public func extract(from snapshot: TextSnapshot, maxLength: Int = 300) -> String {
+        extractSentence(from: snapshot, maxLength: maxLength)?.text ?? ""
+    }
+    public func extractSentence(from snapshot: TextSnapshot, maxLength: Int = 300) -> ExtractedSentence? {
         let text = snapshot.text
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        guard !text.isEmpty, maxLength > 0 else { return nil }
         var caret = Self.caretIndex(in: text, selectedRange: snapshot.selectedRange)
-        if caret > text.startIndex {
+        let requested = min(max(snapshot.selectedRange?.location ?? text.utf16.count, 0), text.utf16.count)
+        if caret > text.startIndex, caret.utf16Offset(in: text) == requested {
             let previous = text.index(before: caret)
-            if Self.terminators.contains(text[previous]) {
-                caret = previous
-            }
+            if Self.terminators.contains(text[previous]) { caret = previous }
         }
-        var result = Self.fragment(in: text, caret: caret)
-        if !Self.isUsable(result) {
-            result = Self.previousUsableSentence(in: text, before: caret) ?? result
+        var range = Self.fragment(in: text, caret: caret)
+        if range.isEmpty { range = Self.previousSentence(in: text, before: caret) ?? range }
+        guard !range.isEmpty else { return nil }
+        if text[range].count > maxLength {
+            range = text.index(range.upperBound, offsetBy: -maxLength)..<range.upperBound
         }
-        if result.count > maxLength { result = String(result.suffix(maxLength)) }
-        return result
+        return ExtractedSentence(text: String(text[range]), range: NSRange(range, in: text))
     }
 
     public func isComplete(_ snapshot: TextSnapshot) -> Bool {
         let text = snapshot.text
         guard !text.isEmpty else { return false }
         let caret = Self.caretIndex(in: text, selectedRange: snapshot.selectedRange)
-        guard caret > text.startIndex else { return false }
-        return Self.terminators.contains(text[text.index(before: caret)])
+        let requested = min(max(snapshot.selectedRange?.location ?? text.utf16.count, 0), text.utf16.count)
+        return caret.utf16Offset(in: text) == requested && caret > text.startIndex
+            && Self.terminators.contains(text[text.index(before: caret)])
     }
-
     private static func caretIndex(in text: String, selectedRange: NSRange?) -> String.Index {
-        let utf16Count = text.utf16.count
-        let offset = selectedRange.map { min(max($0.location, 0), utf16Count) } ?? utf16Count
-        return String.Index(utf16Offset: offset, in: text)
+        let target = min(max(selectedRange?.location ?? text.utf16.count, 0), text.utf16.count)
+        var index = text.startIndex, offset = 0
+        // AX ranges are UTF-16; snap a malformed interior offset to the start
+        // of its complete grapheme, including surrogate pairs and ZWJ emoji.
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            let length = text[index..<next].utf16.count
+            guard offset + length <= target else { break }
+            offset += length
+            index = next
+        }
+        return index
     }
-
-    private static func fragment(in text: String, caret: String.Index) -> String {
-        var start = caret
+    private static func fragment(in text: String, caret: String.Index) -> Range<String.Index> {
+        var start = caret, end = caret
         while start > text.startIndex {
             let previous = text.index(before: start)
             if terminators.contains(text[previous]) { break }
             start = previous
         }
-        var end = caret
-        while end < text.endIndex, !terminators.contains(text[end]) {
-            end = text.index(after: end)
-        }
-        if end < text.endIndex, sentencePunctuation.contains(text[end]) {
-            end = text.index(after: end)
-        }
-        return String(text[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        while end < text.endIndex, !terminators.contains(text[end]) { end = text.index(after: end) }
+        if end < text.endIndex, sentencePunctuation.contains(text[end]) { end = text.index(after: end) }
+        while start < end, whitespace(text[start]) { start = text.index(after: start) }
+        while end > start, whitespace(text[text.index(before: end)]) { end = text.index(before: end) }
+        return start..<end
     }
-
-    private static func previousUsableSentence(in text: String, before caret: String.Index) -> String? {
+    private static func previousSentence(in text: String, before caret: String.Index) -> Range<String.Index>? {
         var probe = caret
         while probe > text.startIndex {
             let previous = text.index(before: probe)
             if terminators.contains(text[previous]) {
-                var inPrevious = previous
-                if inPrevious > text.startIndex {
-                    inPrevious = text.index(before: inPrevious)
-                }
-                let candidate = fragment(in: text, caret: inPrevious)
-                return isUsable(candidate) ? candidate : nil
+                let inside = previous > text.startIndex ? text.index(before: previous) : previous
+                let range = fragment(in: text, caret: inside)
+                return range.isEmpty ? nil : range
             }
             probe = previous
         }
         return nil
     }
+    private static func whitespace(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy(CharacterSet.whitespacesAndNewlines.contains)
+    }
+}
 
-    private static func isUsable(_ sentence: String) -> Bool {
-        !sentence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+/// Main-actor presentation identity, invalidated synchronously before any
+/// asynchronous engine cancellation can run or a debounce can fire.
+@MainActor
+final class RealtimeTranslationState {
+    struct Request: Equatable {
+        let revision: UInt64
+        let sequence: UInt64
+        let session: InputSessionID
+        let sentence: ExtractedSentence
+        var key: String { sentence.key(in: session) }
+    }
+    private(set) var session: InputSessionID?
+    private(set) var sentence: ExtractedSentence?
+    private(set) var anchor: InputAnchor?
+    private var revision: UInt64 = 0
+    private var sequence: UInt64 = 0
+    private(set) var mutationID: UInt64 = 0
+
+    @discardableResult
+    func update(_ snapshot: TextSnapshot, session: InputSessionID, language: Language) -> Bool {
+        let extracted = snapshot.isComposing ? nil : SentenceExtractor().extractSentence(from: snapshot)
+        let next = extracted.flatMap { LanguageTextDetector().contains($0.text, language: language) ? $0 : nil }
+        guard self.session != session || sentence != next else { return false }
+        revision &+= 1
+        mutationID &+= 1
+        if self.session != session { anchor = nil }
+        self.session = session
+        sentence = next
+        return true
+    }
+    func updateAnchor(_ anchor: InputAnchor, session: InputSessionID) -> Bool {
+        if self.session == nil { self.session = session }
+        guard self.session == session else { return false }
+        self.anchor = anchor
+        return true
+    }
+    func invalidate(clearAnchor: Bool = false) {
+        revision &+= 1
+        mutationID &+= 1
+        sentence = nil
+        if clearAnchor { session = nil; anchor = nil }
+    }
+    func beginRequest(text: String, key: String, session: InputSessionID) -> Request? {
+        guard self.session == session, let sentence, sentence.text == text, sentence.key(in: session) == key
+        else { return nil }
+        sequence &+= 1
+        mutationID &+= 1
+        return Request(revision: revision, sequence: sequence, session: session, sentence: sentence)
+    }
+    func accepts(_ request: Request) -> Bool {
+        request.revision == revision && request.sequence == sequence
+            && request.session == session && request.sentence == sentence
     }
 }
 
@@ -169,6 +233,7 @@ public struct FieldReplacement: Equatable, Sendable {
     public let caretUTF16Offset: Int
 
     public var reconstructed: String { prefix + sourceWithTerminator + suffix }
+    public var range: NSRange { NSRange(location: prefix.utf16.count, length: sourceWithTerminator.utf16.count) }
 
     public func applying(translation: String) -> (text: String, caretUTF16Offset: Int) {
         let next = prefix + translation + suffix
@@ -176,24 +241,24 @@ public struct FieldReplacement: Equatable, Sendable {
     }
 
     public static func replacing(
-        fieldText: String, sourceWithTerminator: String, translation: String
+        fieldText: String, sourceWithTerminator: String, translation: String, range: NSRange? = nil
     ) -> (text: String, caretUTF16Offset: Int)? {
         guard !sourceWithTerminator.isEmpty else { return nil }
         let nsField = fieldText as NSString
-        let matchRange = nsField.range(of: sourceWithTerminator, options: .backwards)
-        guard matchRange.location != NSNotFound else { return nil }
+        let matchRange = range ?? nsField.range(of: sourceWithTerminator, options: .backwards)
+        guard valid(matchRange, in: nsField), nsField.substring(with: matchRange) == sourceWithTerminator else { return nil }
         let prefix = nsField.substring(to: matchRange.location)
         let suffix = nsField.substring(from: matchRange.location + matchRange.length)
         let next = prefix + translation + suffix
         return (next, (prefix as NSString).length + (translation as NSString).length)
     }
 
-    public static func evaluate(fieldText: String, source: String) -> FieldReplacement? {
+    public static func evaluate(fieldText: String, source: String, range: NSRange? = nil) -> FieldReplacement? {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let nsField = fieldText as NSString
-        let sourceRange = nsField.range(of: trimmed, options: .backwards)
-        guard sourceRange.location != NSNotFound else { return nil }
+        let sourceRange = range ?? nsField.range(of: trimmed, options: .backwards)
+        guard valid(sourceRange, in: nsField), nsField.substring(with: sourceRange) == trimmed else { return nil }
         let afterSource = sourceRange.location + sourceRange.length
         var terminatorLength = 0
         let alreadyHasPunctuation = trimmed.last.map { SentenceExtractor.sentencePunctuation.contains($0) } ?? false
@@ -214,6 +279,11 @@ public struct FieldReplacement: Equatable, Sendable {
             suffix: suffix,
             caretUTF16Offset: matchRange.location + matchRange.length)
     }
+    private static func valid(_ range: NSRange, in text: NSString) -> Bool {
+        range.location >= 0 && range.location != NSNotFound && range.location <= text.length
+            && range.length >= 0 && range.length <= text.length - range.location
+    }
+
 }
 
 enum FocusedFieldReplacer {
@@ -221,11 +291,12 @@ enum FocusedFieldReplacer {
         currentText: String?,
         sourceWithTerminator: String,
         translation: String,
+        range: NSRange? = nil,
         write: (String, Int) -> Bool
     ) -> Bool {
         guard let currentText,
             let next = FieldReplacement.replacing(
-                fieldText: currentText, sourceWithTerminator: sourceWithTerminator, translation: translation)
+                fieldText: currentText, sourceWithTerminator: sourceWithTerminator, translation: translation, range: range)
         else { return false }
         return write(next.text, next.caretUTF16Offset)
     }
