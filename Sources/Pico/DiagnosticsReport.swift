@@ -46,9 +46,9 @@ enum DiagnosticsReport {
     ) -> String {
         let time = ISO8601DateFormatter().string(from: snapshot.generatedAt)
         var lines: [String] = [
-            "Runwu 诊断报告 / Runwu Diagnostics Report",
+            "润物 诊断报告 / 润物 Diagnostics Report",
             "generated_at: \(time)",
-            "说明：本文件由 Runwu 在本机生成，未经过网络发送；不含翻译内容与 API 密钥。",
+            "说明：本文件由润物在本机生成，未经过网络发送；不含翻译内容与 API 密钥。",
             String(repeating: "=", count: 60),
             "[app]",
             "version: \(snapshot.appVersion) (build \(snapshot.appBuild))",

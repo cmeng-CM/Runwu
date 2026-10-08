@@ -1,5 +1,63 @@
 import Foundation
 
+/// Logging has a separate, closed schema from the user-facing error. Service
+/// bodies, model names, endpoint URLs, NSError userInfo and arbitrary error
+/// descriptions can contain input or credentials and must never enter logs.
+struct TranslationErrorDiagnostic {
+    enum Kind: String {
+        case emptyText = "llm_empty_text"
+        case noModels = "llm_no_enabled_models"
+        case invalidEndpoint = "llm_invalid_endpoint"
+        case timeout = "llm_timeout"
+        case httpStatus = "llm_http_status"
+        case invalidResponse = "llm_invalid_response"
+        case allModelsFailed = "llm_all_models_failed"
+        case network, cancelled, localUnavailable = "local_unavailable", unknown
+    }
+
+    let kind: Kind
+    private var statusCode: Int?
+    private var networkCode: Int?
+    private var failureCount: Int?
+
+    init(_ error: any Error) {
+        switch error {
+        case let error as LLMTranslationError:
+            switch error {
+            case .emptyText: kind = .emptyText
+            case .noEnabledModels: kind = .noModels
+            case .invalidEndpoint: kind = .invalidEndpoint
+            case .timeout: kind = .timeout
+            case .httpStatus(_, let code, _):
+                kind = .httpStatus
+                statusCode = code
+            case .invalidResponse: kind = .invalidResponse
+            case .allModelsFailed(let failures):
+                kind = .allModelsFailed
+                failureCount = failures.count
+            }
+        case let error as URLError:
+            kind = .network
+            networkCode = error.code.rawValue
+        case is CancellationError:
+            kind = .cancelled
+        case is TranslationSessionError:
+            kind = .localUnavailable
+        default:
+            // Do not reflect even unknown errors or serialize their userInfo.
+            kind = .unknown
+        }
+    }
+
+    var fields: String {
+        var parts = ["type=\(kind.rawValue)"]
+        if let statusCode { parts.append("statusCode=\(statusCode)") }
+        if let networkCode { parts.append("networkCode=\(networkCode)") }
+        if let failureCount { parts.append("failureCount=\(failureCount)") }
+        return parts.joined(separator: " ")
+    }
+}
+
 /// Lightweight file log used while diagnosing Accessibility issues.
 ///
 /// Writing is opt-in: it is enabled by the `RUNWU_DEBUG=1` environment

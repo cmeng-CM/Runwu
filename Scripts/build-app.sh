@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 swift build -c release
 BIN_DIR="$(swift build -c release --show-bin-path)"
-APP="$ROOT/Runwu.app"
+APP="$ROOT/润物.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Pico" "$APP/Contents/MacOS/Runwu"

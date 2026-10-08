@@ -5,15 +5,15 @@ import XCTest
 final class DiagnosticsReportTests: XCTestCase {
     private func makeSnapshot() -> DiagnosticsSnapshot {
         DiagnosticsSnapshot(
-            appVersion: "1.0.8", appBuild: "9", bundleID: "com.cmeng.runwu",
-            installPath: "/Applications/Runwu.app", installNeedsHealing: false,
+            appVersion: "1.0.8", appBuild: "9", bundleID: "com.comeg.runwu",
+            installPath: "/Applications/润物.app", installNeedsHealing: false,
             osVersion: "14.6.1", hardwareModel: "Mac15,6", machine: "arm64",
             accessibilityTrusted: false, monitorRunning: false,
             probeLine: "probe target=com.tencent.xinWeChat result=no_text_element",
             weChatVersion: "4.1.5.16", enabled: true, timingRaw: "pause", speedMilliseconds: 450,
             sourceLanguage: "zh", targetLanguage: "en", backendRaw: "local", llmModelCount: 0,
             uiLanguage: "zh", clipboardEnabled: true, clipboardTriggerRaw: "auto-watch",
-            excludedBundleIDs: ["com.cmeng.runwu"], generatedAt: Date(timeIntervalSince1970: 1_789_000_000))
+            excludedBundleIDs: ["com.comeg.runwu"], generatedAt: Date(timeIntervalSince1970: 1_789_000_000))
     }
 
     func testRenderContainsKeyDiagnosticLines() {

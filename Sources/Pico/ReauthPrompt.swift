@@ -58,7 +58,7 @@ enum AccessibilityGrantResetter {
         Task {
             let outcome = await Task.detached(priority: .userInitiated) {
                 AccessibilityGrantResetter.resetOwnGrant(
-                    bundleID: Bundle.main.bundleIdentifier ?? "com.cmeng.runwu")
+                    bundleID: Bundle.main.bundleIdentifier ?? "com.comeg.runwu")
             }.value
             let ok = outcome != .failed
             DiagnosticLog.write("reauth stale grant reset outcome=\(String(describing: outcome))")

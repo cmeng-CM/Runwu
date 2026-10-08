@@ -27,8 +27,8 @@ final class RunwuIdentityTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = SettingsStore(defaults: defaults)
 
-        XCTAssertEqual(KeychainStore.defaultService, "com.cmeng.runwu")
-        XCTAssertTrue(settings.excludedBundleIDs.contains("com.cmeng.runwu"))
+        XCTAssertEqual(KeychainStore.defaultService, "com.comeg.runwu")
+        XCTAssertTrue(settings.excludedBundleIDs.contains("com.comeg.runwu"))
         XCTAssertTrue(settings.excludedBundleIDs.contains("com.asiyoua.pico"))
         XCTAssertFalse(settings.autoUpdateEnabled)
     }

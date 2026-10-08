@@ -36,7 +36,7 @@ public enum KeychainStoreError: Error, Equatable, LocalizedError, Sendable {
 public struct KeychainStore: Sendable {
     /// The app's bundle identifier is used in production. The fallback keeps
     /// command-line/unit-test invocations deterministic when no bundle exists.
-    public static let defaultService = "com.cmeng.runwu"
+    public static let defaultService = "com.comeg.runwu"
 
     public let service: String
     public let accessGroup: String?

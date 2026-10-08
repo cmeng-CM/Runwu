@@ -513,7 +513,7 @@ struct ReplaceShortcut: Equatable, Sendable {
         excludedBundleIDs = Set(
             defaults.stringArray(forKey: "excludedBundleIDs") ?? [
                 "com.agilebits.onepassword7", "com.apple.keychainaccess", "com.apple.dt.Xcode", "com.openai.codex",
-                "com.asiyoua.pico", "com.cmeng.runwu",
+                "com.asiyoua.pico", "com.comeg.runwu",
             ])
         restoreAPIKeysFromKeychain()
         if defaults.object(forKey: "translationSpeed") == nil {

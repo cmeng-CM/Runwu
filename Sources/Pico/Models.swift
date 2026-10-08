@@ -363,7 +363,7 @@ public actor TranslationCoordinator {
             storeInCache(cacheKey, value)
             return value
         } catch {
-            DiagnosticLog.write("translation error type=\(String(reflecting: error))")
+            DiagnosticLog.write("translation error \(TranslationErrorDiagnostic(error).fields)")
             return nil
         }
     }

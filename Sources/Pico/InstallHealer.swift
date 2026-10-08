@@ -39,7 +39,7 @@ enum InstallHealer {
             let dir = URL(fileURLWithPath: base, isDirectory: true)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             guard fm.isWritableFile(atPath: dir.path) else { continue }
-            let dest = dir.appendingPathComponent("Runwu.app", isDirectory: true)
+            let dest = dir.appendingPathComponent("润物.app", isDirectory: true)
             if dest.path == appPath { return dest.path }
             if fm.fileExists(atPath: dest.path) {
                 try fm.removeItem(at: dest)

@@ -607,7 +607,7 @@ struct SettingsView: View {
                 sidebarButton(page)
             }
             Spacer()
-            Text("Runwu v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+            Text("润物 v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 10)

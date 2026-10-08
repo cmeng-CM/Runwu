@@ -30,7 +30,7 @@ public struct InputSessionID: Hashable, Sendable {
 }
 
 @MainActor final class InputCoordinator {
-    private let logger = Logger(subsystem: "com.cmeng.runwu", category: "pipeline")
+    private let logger = Logger(subsystem: "com.comeg.runwu", category: "pipeline")
     private let extractor = SentenceExtractor(), detector = LanguageTextDetector(), debouncer = InputDebouncer()
     private var lastSentence = "", session: InputSessionID?
     var isEnabled = true
@@ -124,7 +124,7 @@ public struct InputSessionID: Hashable, Sendable {
 }
 
 @MainActor final class AccessibilityMonitor {
-    private let logger = Logger(subsystem: "com.cmeng.runwu", category: "accessibility")
+    private let logger = Logger(subsystem: "com.comeg.runwu", category: "accessibility")
     var onSnapshot: ((TextSnapshot, InputSessionID, NSScreen?) -> Void)?
     var excludedBundleIDs: Set<String> = []
     var sourceLanguage: Language = .chinese

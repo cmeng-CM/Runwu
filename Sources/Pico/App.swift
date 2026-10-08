@@ -7,11 +7,11 @@ import SwiftUI
 @main struct PicoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     var body: some Scene {
-        MenuBarExtra("Runwu", image: "MenuBarIcon") {
+        MenuBarExtra("润物", image: "MenuBarIcon") {
             MenuBarMenu(state: appDelegate.state)
         }.menuBarExtraStyle(.menu)
         Settings { SettingsView(state: appDelegate.state) }
-        Window("Welcome to Runwu", id: "welcome") { WelcomeView(state: appDelegate.state) }.defaultSize(
+        Window("Welcome to 润物", id: "welcome") { WelcomeView(state: appDelegate.state) }.defaultSize(
             width: 520, height: 360)
     }
 }
@@ -69,7 +69,7 @@ struct MenuBarMenu: View {
 }
 
 @MainActor final class AppState: ObservableObject {
-    private let logger = Logger(subsystem: "com.cmeng.runwu", category: "runtime")
+    private let logger = Logger(subsystem: "com.comeg.runwu", category: "runtime")
     @Published var enabled: Bool
     private var menuBarWatchdog: Timer?
     private var menuBarHealAttempts = 0
@@ -408,7 +408,7 @@ struct MenuBarMenu: View {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 360), styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        window.title = "Welcome to Runwu"
+        window.title = "Welcome to 润物"
         window.contentView = NSHostingView(rootView: WelcomeView(state: self))
         centerOnMainScreen(window)
         window.isReleasedWhenClosed = false
@@ -835,9 +835,9 @@ struct WelcomeView: View {
             ).font(.title).multilineTextAlignment(.center)
             Text(
                 step == 0
-                        ? "Runwu translates what you're typing without interrupting your workflow."
+                        ? "润物 translates what you're typing without interrupting your workflow."
                         : step == 1
-                            ? "Permission lets Runwu read only the editable text field. Password fields are always skipped."
+                            ? "Permission lets 润物 read only the editable text field. Password fields are always skipped."
                             : "Type something in Chinese in any supported text field."
             ).multilineTextAlignment(.center).foregroundStyle(.secondary)
             if step == 1 && !state.permissionGranted {

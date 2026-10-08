@@ -449,8 +449,8 @@ final class AutoUpdateController: ObservableObject {
         }
         let version = UpdateChecker.stripLeadingV(tag)
         let asset = PicoReleaseInfo.Asset(
-            name: "Runwu-\(version).dmg", size: 0,
-            browserDownloadURL: "https://github.com/cmeng-CM/Runwu/releases/download/\(tag)/Runwu-\(version).dmg")
+            name: "润物-\(version).dmg", size: 0,
+            browserDownloadURL: "https://github.com/cmeng-CM/Runwu/releases/download/\(tag)/润物-\(version).dmg")
         return PicoReleaseInfo(tagName: tag, assets: [asset], body: nil)
     }
 
@@ -490,7 +490,7 @@ final class AutoUpdateController: ObservableObject {
             .appendingPathComponent("runwu-update", isDirectory: true)
         try? FileManager.default.removeItem(at: directory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("Runwu-\(version).dmg")
+        let file = directory.appendingPathComponent("润物-\(version).dmg")
         try data.write(to: file, options: .atomic)
         return file
     }
@@ -503,18 +503,18 @@ final class AutoUpdateController: ObservableObject {
     private func applyStagedUpdateAndRelaunch(dmgFile: URL) {
         let mountPoint = "/tmp/runwu-update-mount"
         let bundlePath = Bundle.main.bundlePath
-        let target = bundlePath.contains("AppTranslocation") ? "/Applications/Runwu.app" : bundlePath
+        let target = bundlePath.contains("AppTranslocation") ? "/Applications/润物.app" : bundlePath
         let parent = (target as NSString).deletingLastPathComponent
         let script = """
         set -e
         for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            pgrep -f "Runwu.app/Contents/MacOS/Runwu" >/dev/null 2>&1 || break
+            pgrep -f "润物.app/Contents/MacOS/Runwu" >/dev/null 2>&1 || break
             sleep 0.5
         done
         mkdir -p "\(mountPoint)"
         hdiutil attach "\(dmgFile.path)" -nobrowse -readonly -mountpoint "\(mountPoint)" >/dev/null
         rm -rf "\(target)"
-        cp -R "\(mountPoint)/Runwu.app" "\(parent)/"
+        cp -R "\(mountPoint)/润物.app" "\(parent)/"
         hdiutil detach "\(mountPoint)" >/dev/null 2>&1 || true
         rm -f "\(dmgFile.path)"
         rmdir "\(mountPoint)" 2>/dev/null || true

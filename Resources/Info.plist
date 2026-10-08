@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Runwu</string>
+	<string>润物</string>
 	<key>CFBundleExecutable</key>
 	<string>Runwu</string>
 	<key>CFBundleIconFile</key>
@@ -11,9 +11,9 @@
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.cmeng.runwu</string>
+	<string>com.comeg.runwu</string>
 	<key>CFBundleName</key>
-	<string>Runwu</string>
+	<string>润物</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

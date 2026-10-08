@@ -10,22 +10,22 @@ fi
 
 zsh "$ROOT/Scripts/build-app.sh"
 
-APP="$ROOT/Runwu.app"
+APP="$ROOT/润物.app"
 STAGE="$ROOT/dist/dmg-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/Runwu.app"
+cp -R "$APP" "$STAGE/润物.app"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-DMG="$ROOT/dist/Runwu-${VERSION}.dmg"
+DMG="$ROOT/dist/润物-${VERSION}.dmg"
 
 create-dmg \
-  --volname "Runwu" \
+  --volname "润物" \
   --volicon "$APP/Contents/Resources/AppIcon.icns" \
   --window-size 600 400 \
   --icon-size 100 \
-  --icon "Runwu.app" 150 200 \
-  --hide-extension "Runwu.app" \
+  --icon "润物.app" 150 200 \
+  --hide-extension "润物.app" \
   --app-drop-link 450 200 \
   --overwrite \
   "$DMG" \

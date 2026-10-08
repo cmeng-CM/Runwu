@@ -33,7 +33,7 @@ enum L10n {
     // MARK: - Settings chrome
 
     static func settingsWindowTitle(_ lang: UILanguage) -> String {
-        lang == .chinese ? "Runwu 设置" : "Runwu Settings"
+        lang == .chinese ? "润物 设置" : "润物 Settings"
     }
     static func tabGeneral(_ lang: UILanguage) -> String {
         lang == .chinese ? "通用" : "General"
@@ -180,7 +180,7 @@ enum L10n {
     static func historyExportMarkdown(_ lang: UILanguage) -> String { lang == .chinese ? "导出 Markdown" : "Export Markdown" }
     static func historyExportExcel(_ lang: UILanguage) -> String { lang == .chinese ? "导出 Excel" : "Export Excel" }
     static func historyExportTitle(_ lang: UILanguage) -> String {
-        lang == .chinese ? "Runwu 历史记录" : "Runwu Translation History"
+        lang == .chinese ? "润物 历史记录" : "润物 Translation History"
     }
     static func historyEmpty(_ lang: UILanguage) -> String {
         lang == .chinese ? "暂时没有已完成的翻译记录。" : "No completed translations yet."
@@ -349,16 +349,16 @@ enum L10n {
     }
     static func reauthWizardSteps(_ lang: UILanguage) -> String {
         lang == .chinese
-            ? "已移除。还剩两步：\n2. 点下方按钮打开系统设置，在辅助功能列表点「＋」，在「应用程序」里选中 Runwu 点「选取」\n3. 打开 Runwu 的开关，几秒内自动恢复。"
-            : "Removed. Two steps left:\n2. Click the button below to open System Settings. In the Accessibility list click ＋, pick Runwu under Applications, click Open\n3. Turn Runwu's switch on — it recovers within seconds."
+            ? "已移除。还剩两步：\n2. 点下方按钮打开系统设置，在辅助功能列表点「＋」，在「应用程序」里选中 润物 点「选取」\n3. 打开 润物 的开关，几秒内自动恢复。"
+            : "Removed. Two steps left:\n2. Click the button below to open System Settings. In the Accessibility list click ＋, pick 润物 under Applications, click Open\n3. Turn 润物's switch on — it recovers within seconds."
     }
     static func reauthWizardOpenSettings(_ lang: UILanguage) -> String {
         lang == .chinese ? "2. 打开系统设置" : "2. Open System Settings"
     }
     static func reauthWizardRemoveFailed(_ lang: UILanguage) -> String {
         lang == .chinese
-            ? "自动移除没有成功。请在辅助功能列表里单击选中 Runwu 这一行，点列表下方的「−」移除，再点「＋」从「应用程序」重新添加并打开开关。"
-            : "Automatic removal did not succeed. In the Accessibility list, click the Runwu row to select it, remove it with the − button, re-add it with ＋ from Applications and turn the switch on."
+            ? "自动移除没有成功。请在辅助功能列表里单击选中 润物 这一行，点列表下方的「−」移除，再点「＋」从「应用程序」重新添加并打开开关。"
+            : "Automatic removal did not succeed. In the Accessibility list, click the 润物 row to select it, remove it with the − button, re-add it with ＋ from Applications and turn the switch on."
     }
     static func reauthOpenSettings(_ lang: UILanguage) -> String {
         lang == .chinese ? "打开系统设置" : "Open System Settings"
@@ -449,8 +449,8 @@ enum L10n {
 
     static func privacyExplanation(_ lang: UILanguage) -> String {
         lang == .chinese
-            ? "Runwu 不会读取或翻译以下应用内的文本。"
-            : "Runwu will not read or translate text inside these apps."
+            ? "润物 不会读取或翻译以下应用内的文本。"
+            : "润物 will not read or translate text inside these apps."
     }
     static func addApplication(_ lang: UILanguage) -> String {
         lang == .chinese ? "＋ 添加应用…" : "+ Add Application…"
@@ -584,13 +584,13 @@ enum L10n {
         lang == .chinese ? "更新失败" : "Update failed"
     }
     static func updateWindowTitle(_ lang: UILanguage) -> String {
-        lang == .chinese ? "Runwu 更新" : "Runwu Update"
+        lang == .chinese ? "润物 更新" : "润物 Update"
     }
     static func updateAutoRestartNote(_ lang: UILanguage) -> String {
-        lang == .chinese ? "下载完成后 Runwu 会自动重启完成安装。" : "Runwu restarts automatically to finish installing."
+        lang == .chinese ? "下载完成后 润物 会自动重启完成安装。" : "润物 restarts automatically to finish installing."
     }
     static func updateAvailableHeading(_ lang: UILanguage, _ version: String) -> String {
-        lang == .chinese ? "Runwu \(version) 可更新" : "Runwu \(version) Is Available"
+        lang == .chinese ? "润物 \(version) 可更新" : "润物 \(version) Is Available"
     }
     static func updateCurrentLine(_ lang: UILanguage, _ version: String) -> String {
         lang == .chinese ? "你当前使用的是 \(version)" : "You're currently on \(version)"
@@ -617,12 +617,12 @@ enum L10n {
     // MARK: - Install location
 
     static func installHealTitle(_ lang: UILanguage) -> String {
-        lang == .chinese ? "把 Runwu 移到「应用程序」文件夹" : "Move Runwu to the Applications folder"
+        lang == .chinese ? "把 润物 移到「应用程序」文件夹" : "Move 润物 to the Applications folder"
     }
     static func installHealBody(_ lang: UILanguage) -> String {
         lang == .chinese
-            ? "Runwu 正在从临时位置运行（磁盘映像或下载文件夹），可能导致系统反复询问权限。\n移到「应用程序」文件夹可避免临时路径带来的问题；重新构建或更换签名后，可能需要重新授权辅助功能。"
-            : "Runwu is running from a temporary location (a disk image or the Downloads folder), which can cause repeated permission prompts.\nMoving it to Applications avoids temporary-path issues. Rebuilding or changing the signature may require granting Accessibility permission again."
+            ? "润物 正在从临时位置运行（磁盘映像或下载文件夹），可能导致系统反复询问权限。\n移到「应用程序」文件夹可避免临时路径带来的问题；重新构建或更换签名后，可能需要重新授权辅助功能。"
+            : "润物 is running from a temporary location (a disk image or the Downloads folder), which can cause repeated permission prompts.\nMoving it to Applications avoids temporary-path issues. Rebuilding or changing the signature may require granting Accessibility permission again."
     }
     static func installHealMoveButton(_ lang: UILanguage) -> String {
         lang == .chinese ? "移到应用程序" : "Move to Applications"
@@ -655,7 +655,7 @@ enum L10n {
     // MARK: - About
 
     static func productName(_ lang: UILanguage) -> String {
-        "Runwu"
+        "润物"
     }
     static func version(
         _ lang: UILanguage,
