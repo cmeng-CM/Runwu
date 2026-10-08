@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+dist/
+*.dmg
+.DS_Store
+xcuserdata/
+*.xcuserstate
+.cursor/
+.agents/
+.omp/
+Pico.app/
+.mimosa/

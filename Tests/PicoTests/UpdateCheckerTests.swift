@@ -1,0 +1,240 @@
+import XCTest
+
+@testable import Pico
+
+final class UpdateCheckerTests: XCTestCase {
+    func testCompareEqualWithLeadingV() {
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.0", remoteTag: "v0.1.0"), .notNewer)
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.0", remoteTag: "V0.1.0"), .notNewer)
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.0", remoteTag: "0.1.0"), .notNewer)
+    }
+
+    func testCompareRemoteNewer() {
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.9", remoteTag: "0.2.0"), .remoteNewer)
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.0", remoteTag: "v0.1.1"), .remoteNewer)
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1", remoteTag: "0.1.1"), .remoteNewer)
+    }
+
+    func testCompareRemoteLowerOrEqual() {
+        XCTAssertEqual(UpdateChecker.compare(local: "0.2.0", remoteTag: "0.1.9"), .notNewer)
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.1", remoteTag: "0.1"), .notNewer)
+    }
+
+    func testCompareUnparseable() {
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.0", remoteTag: "nightly"), .unparseable)
+        XCTAssertEqual(UpdateChecker.compare(local: "", remoteTag: "0.1.0"), .unparseable)
+        XCTAssertEqual(UpdateChecker.compare(local: "0.1.0", remoteTag: ""), .unparseable)
+    }
+
+    func testRequestUsesGitHubLatestAndUserAgent() async {
+        let captured = LockIsolated<[URLRequest]>([])
+        let checker = UpdateChecker(currentVersion: "0.1.0") { request in
+            captured.set(captured.value + [request])
+            throw URLError(.notConnectedToInternet)
+        }
+        _ = await checker.check()
+        XCTAssertEqual(captured.value.first?.url, UpdateChecker.latestReleaseURL)
+        XCTAssertEqual(captured.value.first?.httpMethod, "GET")
+        XCTAssertEqual(captured.value.first?.value(forHTTPHeaderField: "User-Agent"), UpdateChecker.userAgent)
+    }
+
+    func testEmptyLocalVersionFailsWithoutFetch() async {
+        let fetched = LockIsolated(false)
+        let checker = UpdateChecker(currentVersion: "  ") { _ in
+            fetched.set(true)
+            throw URLError(.timedOut)
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .failed)
+        XCTAssertFalse(fetched.value)
+    }
+
+    func testNewerPayloadReturnsReleaseURL() async {
+        let html = "https://github.com/asiyoua/pico/releases/tag/v0.2.0"
+        let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+            githubOK(tag: "v0.2.0", html: html)
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .newer(URL(string: html)!))
+        XCTAssertEqual(result.statusAfterCheck, .idle)
+        XCTAssertEqual(result.urlToOpen, URL(string: html))
+    }
+
+    func testSameVersionIsUpToDateAndDoesNotOpen() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+            githubOK(tag: "v0.1.0", html: "https://github.com/asiyoua/pico/releases/tag/v0.1.0")
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .upToDate)
+        XCTAssertNil(result.urlToOpen)
+        XCTAssertEqual(result.statusAfterCheck, .upToDate)
+    }
+
+    func testLowerRemoteIsUpToDate() async {
+        let checker = UpdateChecker(currentVersion: "0.2.0") { _ in
+            githubOK(tag: "0.1.9", html: "https://github.com/asiyoua/pico/releases/tag/v0.1.9")
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .upToDate)
+    }
+
+    func testNetworkErrorIsFailed() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .failed)
+        XCTAssertNil(result.urlToOpen)
+        XCTAssertEqual(result.statusAfterCheck, .failed)
+    }
+
+    func testHTTPFailuresAreFailed() async {
+        for code in [403, 404, 429] {
+            let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+                githubHTTP(code, body: "{\"message\":\"no\"}")
+            }
+            let result = await checker.check()
+            XCTAssertEqual(result, .failed, "status \(code) should fail")
+            XCTAssertNil(result.urlToOpen)
+        }
+    }
+
+    func testInvalidJSONIsFailed() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+            githubHTTP(200, body: "not-json")
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .failed)
+    }
+
+    func testNonNumericTagIsFailed() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+            githubOK(tag: "nightly", html: "https://github.com/asiyoua/pico/releases/tag/nightly")
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .failed)
+    }
+
+    func testMissingReleaseFieldsAreFailed() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
+            githubHTTP(200, body: "{}")
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .failed)
+    }
+
+    // MARK: Release-page fallback (shared-IP API rate limit, e.g. behind a proxy)
+
+    func testFallsBackToReleasePageWhenAPIRateLimited() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { request in
+            if request.url == UpdateChecker.latestReleaseURL {
+                return githubHTTP(403, body: "{\"message\":\"rate limit\"}")
+            }
+            return pageResponse(finalURL: URL(string: "https://github.com/asiyoua/pico/releases/tag/v0.2.0")!)
+        }
+        let result = await checker.check()
+        XCTAssertEqual(
+            result,
+            .newer(URL(string: "https://github.com/asiyoua/pico/releases/tag/v0.2.0")!))
+    }
+
+    // MARK: Trusted update hosts (download URLs come from release metadata)
+
+    func testSafeUpdateURLAcceptsGitHubHosts() {
+        XCTAssertEqual(
+            UpdateChecker.safeUpdateURL("https://github.com/asiyoua/pico/releases/download/v1.0.3/Pico-1.0.3.dmg")?
+                .host, "github.com")
+        XCTAssertEqual(
+            UpdateChecker.safeUpdateURL("https://objects.githubusercontent.com/x/Pico-1.0.3.dmg")?.host,
+            "objects.githubusercontent.com")
+        XCTAssertEqual(
+            UpdateChecker.safeUpdateURL("https://release-assets.githubusercontent.com/x")?.host,
+            "release-assets.githubusercontent.com")
+        XCTAssertEqual(UpdateChecker.safeUpdateURL("https://api.github.com/repos/asiyoua/pico/releases/latest")?
+            .host, "api.github.com")
+    }
+
+    func testSafeUpdateURLRejectsNonGitHubAndInsecureTargets() {
+        XCTAssertNil(UpdateChecker.safeUpdateURL("http://github.com/asiyoua/pico/releases/download/v1/Pico.dmg"))
+        XCTAssertNil(UpdateChecker.safeUpdateURL("https://evil.example.com/Pico.dmg"))
+        XCTAssertNil(UpdateChecker.safeUpdateURL("https://127.0.0.1/Pico.dmg"))
+        XCTAssertNil(UpdateChecker.safeUpdateURL("https://192.168.1.10/Pico.dmg"))
+        XCTAssertNil(UpdateChecker.safeUpdateURL("not a url"))
+        XCTAssertNil(UpdateChecker.safeUpdateURL(""))
+    }
+
+    func testTrustedHostRejectsLookalikes() {
+        XCTAssertFalse(UpdateChecker.isTrustedUpdateHost("github.com.evil.com"))
+        XCTAssertFalse(UpdateChecker.isTrustedUpdateHost("notgithub.com"))
+        XCTAssertFalse(UpdateChecker.isTrustedUpdateHost("githubusercontent.com.evil.com"))
+        XCTAssertTrue(UpdateChecker.isTrustedUpdateHost("raw.githubusercontent.com"))
+        XCTAssertFalse(UpdateChecker.isTrustedUpdateHost(nil))
+    }
+
+    func testReleasePageFallbackUpToDate() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { request in
+            if request.url == UpdateChecker.latestReleaseURL {
+                return githubHTTP(403, body: "{}")
+            }
+            return pageResponse(finalURL: URL(string: "https://github.com/asiyoua/pico/releases/tag/v0.1.0")!)
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .upToDate)
+    }
+
+    func testReleasePageFallbackWithoutTagIsFailed() async {
+        let checker = UpdateChecker(currentVersion: "0.1.0") { request in
+            if request.url == UpdateChecker.latestReleaseURL {
+                return githubHTTP(403, body: "{}")
+            }
+            return pageResponse(finalURL: URL(string: "https://github.com/asiyoua/pico/releases/latest")!)
+        }
+        let result = await checker.check()
+        XCTAssertEqual(result, .failed)
+    }
+
+    func testTagFromFinalURL() {
+        XCTAssertEqual(
+            UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/asiyoua/pico/releases/tag/v1.2.3")),
+            "v1.2.3")
+        XCTAssertNil(UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/asiyoua/pico/releases/latest")))
+        XCTAssertNil(UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/asiyoua/pico/releases/tag/nightly")))
+        XCTAssertNil(UpdateChecker.tagFromFinalURL(nil))
+    }
+}
+
+private final class LockIsolated<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+
+    init(_ value: Value) {
+        stored = value
+    }
+
+    var value: Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set(_ value: Value) {
+        lock.lock()
+        stored = value
+        lock.unlock()
+    }
+}
+
+private func githubOK(tag: String, html: String) -> (Data, URLResponse) {
+    githubHTTP(200, body: "{\"tag_name\":\"\(tag)\",\"html_url\":\"\(html)\"}")
+}
+
+private func githubHTTP(_ status: Int, body: String) -> (Data, URLResponse) {
+    let response = HTTPURLResponse(
+        url: UpdateChecker.latestReleaseURL, statusCode: status, httpVersion: nil, headerFields: nil)!
+    return (Data(body.utf8), response)
+}
+
+private func pageResponse(finalURL: URL) -> (Data, URLResponse) {
+    let response = HTTPURLResponse(url: finalURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+    return (Data(), response)
+}

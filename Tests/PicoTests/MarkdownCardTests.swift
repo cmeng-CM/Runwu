@@ -1,0 +1,169 @@
+import SwiftUI
+import XCTest
+
+@testable import Pico
+
+final class MarkdownCardTests: XCTestCase {
+    func testPlainChineseStaysPlainWithoutAnyMarkdownGuessing() {
+        let document = MarkdownCard.parse("今天天气不错，适合出门散步。")
+        XCTAssertFalse(document.isMarkdown)
+        XCTAssertEqual(document.blocks, [.paragraph("今天天气不错，适合出门散步。")])
+    }
+
+    func testMathAsterisksAreNotMistakenForEmphasis() {
+        // 没有块级强特征、也没有双星行内特征的文本不启用 Markdown
+        let document = MarkdownCard.parse("2*3*4 等于 24")
+        XCTAssertFalse(document.isMarkdown)
+    }
+
+    func testInlineOnlyBoldTextIsDetectedAsMarkdown() {
+        // 双星行内特征（AI 输出最常见的形态）也必须启用渲染
+        let document = MarkdownCard.parse("这是**加粗**和*斜体*的混排段落。")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(document.blocks.count, 1)
+        if case .paragraph(let text) = document.blocks[0] {
+            XCTAssertEqual(text, "这是**加粗**和*斜体*的混排段落。")
+        } else {
+            XCTFail("应为单段落块")
+        }
+    }
+
+    func testHeadingLevelAndTrailingParagraph() {
+        let document = MarkdownCard.parse("### 标题\n正文内容")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(
+            document.blocks,
+            [.heading(level: 3, text: "标题"), .paragraph("正文内容")])
+    }
+
+    func testBulletItemsGroupUntilBlankLine() {
+        let document = MarkdownCard.parse("- 甲\n- 乙\n\n收尾段落")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(
+            document.blocks,
+            [.bullet(items: [
+                MarkdownCard.ListItem(indent: 0, text: "甲"),
+                MarkdownCard.ListItem(indent: 0, text: "乙"),
+            ]), .paragraph("收尾段落")])
+    }
+
+    func testOrderedItems() {
+        let document = MarkdownCard.parse("1. 第一\n2. 第二")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(
+            document.blocks,
+            [.ordered(items: [
+                MarkdownCard.OrderedItem(number: 1, text: "第一"),
+                MarkdownCard.OrderedItem(number: 2, text: "第二"),
+            ])])
+    }
+
+    /// 引擎译文在有序列表项之间输出空行（段落分隔），列表不得被拆散——
+    /// 否则每个单条块都从 1 数起，2/3/4 条目全显示成 1（2026-09-20 用户报）。
+    func testOrderedListContinuesAcrossBlankLines() {
+        let document = MarkdownCard.parse("1. 甲\n\n2. 乙\n\n3. 丙")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(
+            document.blocks,
+            [.ordered(items: [
+                MarkdownCard.OrderedItem(number: 1, text: "甲"),
+                MarkdownCard.OrderedItem(number: 2, text: "乙"),
+                MarkdownCard.OrderedItem(number: 3, text: "丙"),
+            ])])
+    }
+
+    /// 渲染用源文本的真实序号，不按下标重编。
+    func testOrderedNumbersPreservedFromSource() {
+        let document = MarkdownCard.parse("3. 甲\n\n5. 乙")
+        XCTAssertEqual(
+            document.blocks,
+            [.ordered(items: [
+                MarkdownCard.OrderedItem(number: 3, text: "甲"),
+                MarkdownCard.OrderedItem(number: 5, text: "乙"),
+            ])])
+    }
+
+    /// 空行后接普通段落：段落分段语义保持不变，列表终止。
+    func testBlankLineStillSplitsParagraphsAndEndsList() {
+        let document = MarkdownCard.parse("1. 甲\n\n收尾段落")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(
+            document.blocks,
+            [.ordered(items: [MarkdownCard.OrderedItem(number: 1, text: "甲")]), .paragraph("收尾段落")])
+    }
+
+    func testFencedCodeKeepsLinesVerbatimAndStripsLanguage() {
+        let document = MarkdownCard.parse("```swift\nlet a = 1\nlet b = 2\n```")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(document.blocks, [.code("let a = 1\nlet b = 2")])
+    }
+
+    func testQuoteLinesMerge() {
+        let document = MarkdownCard.parse("> 引用一\n> 引用二")
+        XCTAssertTrue(document.isMarkdown)
+        XCTAssertEqual(document.blocks, [.quote("引用一\n引用二")])
+    }
+
+    func testDividerNeedsThreeIdenticalMarks() {
+        XCTAssertTrue(MarkdownCard.parse("---").isMarkdown)
+        XCTAssertTrue(MarkdownCard.parse("***").isMarkdown)
+        // 行中段出现横杠不算分隔线；行首的「- 」是列表符号、同样不是分隔线
+        XCTAssertFalse(MarkdownCard.parse("普通文本-含横杠不是分隔线").isMarkdown)
+    }
+
+    func testConsecutiveChineseLinesMergeWithoutSpace() {
+        // 有 Markdown 强特征（标题）时，后续连续中文行按段落合并、不留空格
+        let document = MarkdownCard.parse("### 标题\n第一行内容\n第二行内容")
+        XCTAssertEqual(
+            document.blocks,
+            [.heading(level: 3, text: "标题"), .paragraph("第一行内容第二行内容")])
+    }
+
+    func testPlainTextFallbackKeepsRawTextVerbatim() {
+        // 非 Markdown 文本必须原样保留（含换行），和旧行为完全一致
+        let document = MarkdownCard.parse("第一行内容\n第二行内容")
+        XCTAssertFalse(document.isMarkdown)
+        XCTAssertEqual(document.blocks, [.paragraph("第一行内容\n第二行内容")])
+    }
+
+    func testInlineKeepsCodeIntentAndStripsLinkTapTarget() {
+        let attributed = MarkdownCard.inline(
+            "**加粗**与`行内码`以及[链接](https://example.com)",
+            fontSize: 13,
+            accentColor: .blue)
+        var sawCode = false
+        var sawLinkRemoved = true
+        for run in attributed.runs {
+            if run.inlinePresentationIntent?.contains(.code) == true { sawCode = true }
+            if run.link != nil { sawLinkRemoved = false }
+        }
+        XCTAssertTrue(sawCode, "行内码必须带 code intent")
+        XCTAssertTrue(sawLinkRemoved, "链接必须剥掉可点击属性（隐私：不误触打开网页）")
+    }
+
+    func testUnbalancedMarkersGetStripped() {
+        // 未配对的 ** 属于破损标记：剥掉符号、保留文字（不把符号留在卡片上）
+        let attributed = MarkdownCard.inline("**没闭合的加粗", fontSize: 13, accentColor: .blue)
+        XCTAssertEqual(String(attributed.characters), "没闭合的加粗")
+    }
+
+    func testBrokenPairsRenderAlternatingBold() {
+        // 破损配对兜底：按 ** 切分，奇数段（两个标记之间的内容）渲染为粗体
+        let attributed = MarkdownCard.inline(
+            "前文 **加粗内容** 后文 **另一段** 收尾", fontSize: 13, accentColor: .blue)
+        let plain = String(attributed.characters)
+        XCTAssertFalse(plain.contains("**"), "符号必须被消费")
+        XCTAssertTrue(plain.contains("加粗内容"))
+        XCTAssertTrue(plain.contains("另一段"))
+        XCTAssertTrue(plain.contains("收尾"))
+    }
+
+    func testInlineStrikethroughGetsLineStyle() {
+        let attributed = MarkdownCard.inline("~~划掉~~", fontSize: 13, accentColor: .blue)
+        var hasStyle = false
+        for run in attributed.runs where run.swiftUI.strikethroughStyle != nil {
+            hasStyle = true
+        }
+        XCTAssertTrue(hasStyle, "删除线必须映射到 strikethroughStyle")
+    }
+}
