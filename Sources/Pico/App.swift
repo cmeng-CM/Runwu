@@ -261,7 +261,7 @@ struct MenuBarMenu: View {
     }
     func startTranslationHost() {
         guard translationHostWindow == nil else { return }
-        translationHostWindow = TranslationHostWindowController(holder: translationHolder, settings: settings)
+        translationHostWindow = TranslationHostWindowController(holder: translationHolder)
         startMenuBarWatchdog()
     }
 
@@ -1025,42 +1025,45 @@ struct WelcomeView: View {
     }
 }
 
+/// Production and the no-language-package harness share this actual SwiftUI
+/// identity boundary. A-B-A still creates a new child, even though the final
+/// language pair equals the pair in the preceding render.
+struct TranslationHostGenerationView<Content: View>: View {
+    @ObservedObject var holder: TranslationSessionHolder
+    let content: (TranslationHostConfiguration) -> Content
+    var body: some View {
+        let request = holder.hostConfiguration
+        content(request).id(request.generation)
+    }
+}
+
 struct TranslationHostView: View {
     let holder: TranslationSessionHolder
-    @ObservedObject var settings: SettingsStore
-    @State private var configuration: TranslationSession.Configuration
-
-    init(holder: TranslationSessionHolder, settings: SettingsStore) {
-        self.holder = holder
-        self.settings = settings
-        _configuration = State(
-            initialValue: TranslationSession.Configuration(
-                source: settings.sourceLanguage.locale, target: settings.targetLanguage.locale))
-    }
-
     var body: some View {
-        let source = settings.sourceLanguage
-        let target = settings.targetLanguage
+        TranslationHostGenerationView(holder: holder) { request in
+            TranslationHostTaskView(holder: holder, request: request)
+        }
+    }
+}
+
+private struct TranslationHostTaskView: View {
+    let holder: TranslationSessionHolder
+    let request: TranslationHostConfiguration
+    var body: some View {
         Color.clear
             .frame(width: 1, height: 1)
-            .onChange(of: settings.sourceLanguage) { _, _ in resetConfiguration() }
-            .onChange(of: settings.targetLanguage) { _, _ in resetConfiguration() }
-            .translationTask(configuration) { session in
-                holder.attach(session, source: source, target: target)
+            .translationTask(TranslationSession.Configuration(source: request.source.locale, target: request.target.locale)) { session in
+                // Capture the child generation that created this native task;
+                // never read a newer generation when an old task returns.
+                holder.attach(session, configuration: request)
             }
-    }
-
-    private func resetConfiguration() {
-        holder.configure(source: settings.sourceLanguage, target: settings.targetLanguage)
-        configuration = TranslationSession.Configuration(
-            source: settings.sourceLanguage.locale, target: settings.targetLanguage.locale)
     }
 }
 
 @MainActor final class TranslationHostWindowController {
     private let window: NSWindow
 
-    init(holder: TranslationSessionHolder, settings: SettingsStore) {
+    init(holder: TranslationSessionHolder) {
         let panel = NSPanel(
             contentRect: NSRect(x: -2000, y: -2000, width: 8, height: 8),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -1075,7 +1078,7 @@ struct TranslationHostView: View {
         panel.backgroundColor = .clear
         panel.alphaValue = 0.01
         panel.ignoresMouseEvents = true
-        panel.contentView = NSHostingView(rootView: TranslationHostView(holder: holder, settings: settings))
+        panel.contentView = NSHostingView(rootView: TranslationHostView(holder: holder))
         panel.orderFrontRegardless()
         window = panel
     }

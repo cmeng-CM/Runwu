@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import XCTest
+import SwiftUI
 @testable import Pico
 
 @MainActor
@@ -101,6 +102,50 @@ final class ServiceRoutingTests: XCTestCase {
         XCTAssertFalse(holder.configure(source: .english, target: .japanese))
         do { _ = try await holder.translate("你好。", from: .chinese, to: .english); XCTFail("An old direction cannot wait for or consume the current session") }
         catch { XCTAssertTrue(error is TranslationSessionError) }
+    }
+
+    func testRealSwiftUIHostRecreatesGenerationForCoalescedRoundTripAndRejectsOldAttachIdentity() async throws {
+        let holder = TranslationSessionHolder()
+        var appeared: [TranslationHostConfiguration] = []
+        // This is the production identity wrapper with an inert child. The
+        // real native translation modifier is never installed/downloaded.
+        let host = NSHostingView(rootView: TranslationHostGenerationView(holder: holder) { request in
+            Color.clear.frame(width: 1, height: 1).onAppear { appeared.append(request) }
+        })
+        let panel = NSPanel(contentRect: NSRect(x: -2000, y: -2000, width: 20, height: 20),
+            styleMask: [.nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.contentView = host
+        panel.orderFrontRegardless()
+        defer { panel.close() }
+        host.layoutSubtreeIfNeeded()
+        try await wait { appeared.count == 1 }
+        let original = try XCTUnwrap(appeared.first)
+        XCTAssertTrue(holder.acceptsHostConfiguration(original))
+        XCTAssertFalse(holder.configure(source: .chinese, target: .english))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(appeared.count, 1, "Same-pair edits/resume must retain the native host child")
+
+        // No suspension/render between changes: old onChange(pair) lost this.
+        XCTAssertTrue(holder.configure(source: .chinese, target: .japanese))
+        let intermediate = holder.hostConfiguration
+        XCTAssertTrue(holder.configure(source: .chinese, target: .english))
+        let roundTrip = holder.hostConfiguration
+        host.layoutSubtreeIfNeeded()
+        try await wait { appeared.contains(roundTrip) }
+        XCTAssertEqual(appeared.map(\.generation), [0, 2])
+        XCTAssertEqual(roundTrip.target, original.target)
+        XCTAssertFalse(holder.acceptsHostConfiguration(original), "Old A task must not attach to new A")
+        XCTAssertFalse(holder.acceptsHostConfiguration(intermediate))
+        XCTAssertTrue(holder.acceptsHostConfiguration(roundTrip))
+
+        XCTAssertTrue(holder.configure(source: .chinese, target: .german))
+        let singleEdit = holder.hostConfiguration
+        try await wait { appeared.contains(singleEdit) }
+        XCTAssertEqual(appeared.map(\.generation), [0, 2, 3])
+        XCTAssertFalse(holder.acceptsHostConfiguration(roundTrip))
+        XCTAssertTrue(holder.acceptsHostConfiguration(singleEdit))
+        print("HOST_GENERATION_HARNESS generations=\(appeared.map(\.generation)) targets=\(appeared.map { $0.target.rawValue })")
     }
 
     func testBackendAndFollowCaretPersistWithLegacyRawValuesAndDefaults() {

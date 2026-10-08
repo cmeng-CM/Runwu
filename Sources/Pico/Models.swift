@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 @preconcurrency import Translation
 
 /// Languages exposed in the translation direction pickers.
@@ -495,23 +496,32 @@ enum TranslationSessionError: Error {
     case unavailable
 }
 
+struct TranslationHostConfiguration: Equatable, Sendable {
+    let source: Language
+    let target: Language
+    let generation: UInt64
+}
+
 @MainActor
-final class TranslationSessionHolder {
+final class TranslationSessionHolder: ObservableObject {
     private var session: TranslationSession?
     private var sessionSource: Language?
     private var sessionTarget: Language?
-    private var requestedSource: Language = .chinese
-    private var requestedTarget: Language = .english
+    @Published private(set) var hostConfiguration = TranslationHostConfiguration(source: .chinese, target: .english, generation: 0)
     private var waiters: [UUID: CheckedContinuation<TranslationSession, Error>] = [:]
 
-    func attach(_ session: TranslationSession, source: Language, target: Language) {
+    func acceptsHostConfiguration(_ configuration: TranslationHostConfiguration) -> Bool {
+        configuration == hostConfiguration
+    }
+
+    func attach(_ session: TranslationSession, configuration: TranslationHostConfiguration) {
         // A previous SwiftUI task can complete after its configuration has
-        // been invalidated. Never let that old session satisfy a request for
-        // the newly selected language pair.
-        guard requestedSource == source, requestedTarget == target else { return }
+        // been invalidated. Even A-B-A must reject the first A's callback,
+        // so both the language pair and native host generation must match.
+        guard acceptsHostConfiguration(configuration), !Task.isCancelled else { return }
         self.session = session
-        sessionSource = source
-        sessionTarget = target
+        sessionSource = configuration.source
+        sessionTarget = configuration.target
         let pending = Array(waiters.values)
         waiters.removeAll()
         pending.forEach { $0.resume(returning: session) }
@@ -519,18 +529,18 @@ final class TranslationSessionHolder {
 
     @discardableResult
     func configure(source: Language, target: Language) -> Bool {
-        // The SwiftUI host reruns translationTask only when the language pair
-        // changes. Clearing an attached session on backend edits or resume
-        // would leave the same-pair local engine permanently unready.
-        guard requestedSource != source || requestedTarget != target else { return false }
+        // Same-pair backend edits/resume preserve readiness. Every actual
+        // direction change publishes a new host identity, including A-B-A
+        // changes coalesced into one SwiftUI render.
+        guard hostConfiguration.source != source || hostConfiguration.target != target else { return false }
         let pending = Array(waiters.values)
         waiters.removeAll()
         pending.forEach { $0.resume(throwing: TranslationSessionError.unavailable) }
-        requestedSource = source
-        requestedTarget = target
         session = nil
         sessionSource = nil
         sessionTarget = nil
+        hostConfiguration = TranslationHostConfiguration(source: source, target: target,
+            generation: hostConfiguration.generation &+ 1)
         return true
     }
 
@@ -542,7 +552,7 @@ final class TranslationSessionHolder {
 
     private func readySession(from source: Language, to target: Language) async throws -> TranslationSession {
         try Task.checkCancellation()
-        guard requestedSource == source, requestedTarget == target else {
+        guard hostConfiguration.source == source, hostConfiguration.target == target else {
             throw TranslationSessionError.unavailable
         }
         if let session, sessionSource == source, sessionTarget == target { return session }
