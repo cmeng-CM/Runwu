@@ -135,6 +135,121 @@ final class CaretTrackingTests: XCTestCase {
         XCTAssertEqual(translated, [fixture.text!])
     }
 
+    func testMarkedReadFailuresCancelPendingAndRecoverIdenticalTextAndRange() async {
+        for failure in [AXAttributeResult.unavailable(.cannotComplete), .unavailable(.failure),
+            .unavailable(.apiDisabled), .budgetExhausted] {
+            let fixture = AXFixture(), input = InputCoordinator()
+            let monitor = fixture.monitor()
+            input.delayMilliseconds = 20
+            var emitted: [InputSessionID] = [], anchors: [InputSessionID] = []
+            monitor.onFocusChanged = { input.reset() }
+            monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
+            monitor.onAnchorChanged = { _, session in anchors.append(session) }
+            input.onSentence = { _, _, session, _, _ in emitted.append(session) }
+            monitor.readSnapshot() // Queue a request from a trusted sample.
+            let oldSession = anchors.last
+            let reads = fixture.contentReads
+            fixture.markedReadResult = failure
+            fixture.direct?.origin.x += 10
+            monitor.readSnapshot()
+            XCTAssertNil(monitor.snapshotNow(), "Shortcut must not recover cached text on unknown composition")
+            XCTAssertEqual(fixture.contentReads, reads, "Unknown composition must not read raw AXValue")
+            try? await Task.sleep(for: .milliseconds(70))
+            XCTAssertTrue(emitted.isEmpty, "Unknown composition cancels the older debounce")
+            XCTAssertNotEqual(anchors.last, oldSession, "Old realtime request identity must be invalidated")
+            fixture.markedReadResult = nil
+            monitor.readSnapshot()
+            try? await Task.sleep(for: .milliseconds(70))
+            XCTAssertEqual(emitted.count, 1, "Identical text/range must recover after a trusted read")
+            XCTAssertNotEqual(emitted.first, oldSession)
+        }
+    }
+
+    func testMarkedErrorAfterActiveCompositionCannotForgeCommitInAnyTimingMode() async {
+        for timing in [TranslationTiming.pause, .completeSentence, .shortcut] {
+            let fixture = AXFixture(), input = InputCoordinator()
+            let monitor = fixture.monitor()
+            input.timing = timing; input.delayMilliseconds = 20
+            fixture.selected = NSRange(location: fixture.text!.utf16.count, length: 0)
+            var emitted = 0
+            monitor.onFocusChanged = { input.reset() }
+            monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
+            input.onSentence = { _, _, _, _, _ in emitted += 1 }
+            fixture.marked = NSRange(location: 2, length: 2)
+            monitor.readSnapshot()
+            fixture.errors["AXTextInputMarkedRange"] = .cannotComplete
+            let reads = fixture.contentReads
+            monitor.readSnapshot()
+            if let sample = monitor.snapshotNow() {
+                input.translateNow(sample.snapshot, session: sample.session, screen: sample.screen)
+            }
+            try? await Task.sleep(for: .milliseconds(70))
+            XCTAssertEqual(emitted, 0)
+            XCTAssertEqual(fixture.contentReads, reads)
+            fixture.errors.removeValue(forKey: "AXTextInputMarkedRange")
+            fixture.marked = NSRange(location: 2, length: 0)
+            monitor.readSnapshot()
+            if timing == .shortcut, let sample = monitor.snapshotNow() {
+                input.translateNow(sample.snapshot, session: sample.session, screen: sample.screen)
+            }
+            try? await Task.sleep(for: .milliseconds(70))
+            XCTAssertEqual(emitted, 1)
+        }
+    }
+
+    func testUnknownCompositionInvalidatesRealAppPendingAndRejectsLateResult() async throws {
+        _ = NSApplication.shared
+        let suite = "RunwuMarkedApp.\(UUID().uuidString)", defaults = UserDefaults(suiteName: suite)!
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = SettingsStore(defaults: defaults), engine = MarkedBoundaryEngine()
+        store.neverHide = true
+        let app = AppState(settings: store, translationEngine: engine,
+            historyDatabaseURL: directory.appendingPathComponent("history.sqlite"), startRuntime: false)
+        defer {
+            app.input.reset(); app.overlay.hide()
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        app.input.delayMilliseconds = 10
+        let fixture = AXFixture(), monitor = fixture.monitor()
+        monitor.onFocusChanged = app.monitor.onFocusChanged
+        monitor.onSnapshot = app.monitor.onSnapshot
+        monitor.onAnchorChanged = app.monitor.onAnchorChanged
+        monitor.readSnapshot()
+        for _ in 0..<100 {
+            if await engine.count == 1 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let started = await engine.count
+        XCTAssertEqual(started, 1)
+        XCTAssertTrue(app.hasPendingTranslationAction)
+        fixture.markedReadResult = .unavailable(.cannotComplete)
+        monitor.readSnapshot()
+        XCTAssertFalse(app.hasPendingTranslationAction, "Production App must invalidate synchronously")
+        XCTAssertTrue(app.overlay.cardContents.isEmpty)
+        try await Task.sleep(for: .milliseconds(130))
+        XCTAssertTrue(app.history.entries.isEmpty, "Late synthetic response must not become history")
+        XCTAssertTrue(app.overlay.cardContents.isEmpty)
+        fixture.markedReadResult = nil
+        monitor.readSnapshot()
+        for _ in 0..<100 {
+            if app.history.entries.count == 1 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(app.history.entries.count, 1)
+        let recovered = await engine.count
+        XCTAssertEqual(recovered, 2)
+    }
+
+    func testMarkedUnsupportedAndNoValueAreKnownInactive() throws {
+        for error in [AXError.attributeUnsupported, .noValue] {
+            let fixture = AXFixture()
+            fixture.errors["AXTextInputMarkedRange"] = error
+            XCTAssertEqual(try XCTUnwrap(fixture.geometry()).isComposing, false)
+            XCTAssertNotNil(fixture.monitor().snapshotNow())
+        }
+    }
+
     func testSameAppFieldChangeCreatesSessionBeforeAnchorAndClearsRecovery() {
         let fixture = AXFixture()
         let monitor = fixture.monitor()
@@ -316,6 +431,7 @@ private final class AXFixture {
     var text: String? = "我今天会晚一点。"
     var label: String?
     var errors: [String: AXError] = [:]
+    var markedReadResult: AXAttributeResult?
     var selected = NSRange(location: 5, length: 0), marked: NSRange?
     var direct: NSRect? = NSRect(x: 220, y: 150, width: 1, height: 20)
     var previous: NSRect?, next: NSRect?, marker: NSRect?
@@ -363,6 +479,7 @@ private final class AXFixture {
             }
         }
         return AXFieldAccess(readAttribute: { [self] element, key in
+            if key == "AXTextInputMarkedRange", let result = markedReadResult { return result }
             if let error = errors[key] { return .unavailable(error) }
             return attribute(element, key).map(AXAttributeResult.value) ?? .unavailable(.attributeUnsupported)
         }, parameterized: { [self] _, key, parameter in
@@ -385,5 +502,15 @@ private final class AXFixture {
     }
     static func rect(_ value: NSRect) -> AXValue {
         var value = value; return AXValueCreate(.cgRect, &value)!
+    }
+}
+
+private actor MarkedBoundaryEngine: TranslationEngine {
+    private(set) var count = 0
+    func translate(_ text: String, from: Language, to: Language) async throws -> String {
+        count += 1
+        // Ignore cancellation deliberately to test App identity rejection.
+        try? await Task.sleep(for: .milliseconds(100))
+        return "Synthetic translation."
     }
 }

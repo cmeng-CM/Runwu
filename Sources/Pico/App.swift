@@ -95,7 +95,9 @@ struct MenuBarMenu: View {
     let history: TranslationHistoryController
     let overlay = OverlayCoordinator()
     let speech: SpeechPerforming
-    let pasteboardWatcher = PasteboardWatcher()
+    let pasteboardWatcher: PasteboardWatcher
+    private let clipboardReader: any PasteboardReading
+    private let frontmostBundleIdentifier: () -> String?
     let autoUpdater: AutoUpdateController
     private let speechPolicy = SpeechPolicyEvaluator()
     private let hotKey = GlobalHotKey.shared
@@ -118,7 +120,9 @@ struct MenuBarMenu: View {
         historyDatabaseURL: URL? = nil, startRuntime: Bool = true,
         engines: [TranslationBackend: any TranslationEngine] = [:],
         modelFactory: @escaping TranslationService.ModelFactory = { LLMModelRouter(models: $0, timeoutSeconds: $1) },
-        speech suppliedSpeech: (any SpeechPerforming)? = nil) {
+        speech suppliedSpeech: (any SpeechPerforming)? = nil,
+        clipboardReader: any PasteboardReading = SystemPasteboard(),
+        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) {
         let enabledValue = store.enabled
         let trustedValue = startRuntime && AXIsProcessTrusted()
         let welcomeValue = startRuntime && !UserDefaults.standard.bool(forKey: "onboardingComplete")
@@ -131,6 +135,9 @@ struct MenuBarMenu: View {
             timeoutSeconds: store.llmFallbackTimeout, engines: engines, modelFactory: modelFactory)
         let historyController = TranslationHistoryController(databaseURL: historyDatabaseURL)
         settings = store
+        self.clipboardReader = clipboardReader
+        self.frontmostBundleIdentifier = frontmostBundleIdentifier
+        pasteboardWatcher = PasteboardWatcher(pasteboard: clipboardReader)
         runtimeEnabled = startRuntime
         autoUpdater = AutoUpdateController(settings: store)
         enabled = enabledValue
@@ -183,6 +190,7 @@ struct MenuBarMenu: View {
         settings.onClipboardSettingsChanged = { [weak self] in self?.applyClipboardSettings() }
         settings.onAutoUpdateChanged = { [weak self] in self?.autoUpdater.startMonitoring() }
         overlay.onCopyToPasteboard = { [weak self] _ in self?.pasteboardWatcher.resyncBaseline() }
+        pasteboardWatcher.permitsRead = { [weak self] in self?.permitsAutomaticClipboardRead ?? false }
         pasteboardWatcher.onCopy = { [weak self] text in self?.translateCopiedText(text, autoTriggered: true) }
         settings.onHistoryRetentionChanged = { [weak self] in
             guard let self else { return }
@@ -745,21 +753,26 @@ struct MenuBarMenu: View {
         translateCopiedText(autoTriggered: false)
     }
 
+    private var permitsAutomaticClipboardRead: Bool {
+        guard enabled, settings.clipboardTranslationEnabled,
+            settings.clipboardTriggerMode == .autoWatch else { return false }
+        return !settings.excludedBundleIDs.contains(frontmostBundleIdentifier() ?? "")
+    }
+
     /// Translates the current clipboard content (hotkey) or the freshly
     /// copied text (auto watch). Auto mode only fires for text in the
     /// configured source language so code and links stay quiet.
     func translateCopiedText(_ rawText: String? = nil, autoTriggered: Bool) {
+        if autoTriggered, !permitsAutomaticClipboardRead {
+            pasteboardWatcher.resyncBaseline()
+            return
+        }
         guard enabled, settings.clipboardTranslationEnabled else { return }
-        guard var text = (rawText ?? NSPasteboard.general.string(forType: .string))?
+        guard var text = (rawText ?? clipboardReader.readString())?
             .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
         else { return }
         if text.count > 2000 { text = String(text.prefix(2000)) }
         if autoTriggered {
-            // 黑名单应用保持完全静音：前台是排除应用时不触发剪贴板翻译
-            if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-                settings.excludedBundleIDs.contains(front) {
-                return
-            }
             guard LanguageTextDetector().contains(text, language: settings.sourceLanguage) else { return }
         }
         // 微信读书等阅读器复制出来的选区没有换行，先按句子重建段落，

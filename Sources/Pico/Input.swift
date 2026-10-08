@@ -261,6 +261,11 @@ public struct InputSessionID: Hashable, Sendable {
         guard force || !same else { return }
         unobserveField()
         focused = element
+        invalidateInput()
+        if isRunning, let element { observeField(element) }
+    }
+
+    private func invalidateInput() {
         session = InputSessionID(pid: application?.pid ?? 0)
         lastText = nil
         lastGoodText = nil
@@ -268,7 +273,6 @@ public struct InputSessionID: Hashable, Sendable {
         lastComposing = nil
         lastAnchor = nil
         onFocusChanged?()
-        if isRunning, let element { observeField(element) }
     }
 
     private func observeApplication(_ element: AXUIElement, pid: pid_t) {
@@ -328,6 +332,16 @@ public struct InputSessionID: Hashable, Sendable {
         guard let app = application, currentApplication()?.pid == app.pid, let element = focused,
             let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
                 excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())) else { return nil }
+        guard let composing = geometry.isComposing else {
+            // Reject unreadable marked state before AXValue/shortcut recovery.
+            // Rotate request identity and clear dedup even for identical text.
+            invalidateInput()
+            guard focused.map({ CFEqual($0, element) }) == true,
+                currentApplication()?.pid == app.pid else { return nil }
+            lastAnchor = geometry.anchor
+            onAnchorChanged?(geometry.anchor, session)
+            return nil
+        }
         let capturedSession = session
         // Independent geometry and composition precede text de-duplication.
         if geometry.anchor != lastAnchor {
@@ -340,20 +354,20 @@ public struct InputSessionID: Hashable, Sendable {
             setFocused(nil)
             return nil
         }
-        if force, geometry.isComposing { return nil }
+        if force, composing { return nil }
         let read = reader.text(element)
-        guard let text = read ?? ((force || geometry.isComposing) ? "" : nil) else { return nil }
+        guard let text = read ?? ((force || composing) ? "" : nil) else { return nil }
         let snapshot = TextSnapshot(pid: app.pid, bundleIdentifier: app.bundleID, text: text,
             selectedRange: geometry.selectedRange, fieldFrame: geometry.anchor.fieldFrame,
-            caretFrame: geometry.anchor.caretFrame, isComposing: geometry.isComposing)
+            caretFrame: geometry.anchor.caretFrame, isComposing: composing)
         let point = geometry.anchor.caretFrame ?? geometry.anchor.fieldFrame
         let screen = point.flatMap { rect in NSScreen.screens.first { $0.frame.contains(NSPoint(x: rect.midX, y: rect.midY)) } }
         let changed = text != lastText || geometry.selectedRange != lastSelectedRange
-            || geometry.isComposing != lastComposing
-        if !text.isEmpty, !geometry.isComposing { lastGoodText = text }
+            || composing != lastComposing
+        if !text.isEmpty, !composing { lastGoodText = text }
         lastText = text
         lastSelectedRange = geometry.selectedRange
-        lastComposing = geometry.isComposing
+        lastComposing = composing
         if !force, changed { onSnapshot?(snapshot, capturedSession, screen) }
         return (snapshot, capturedSession, screen)
     }
@@ -396,7 +410,7 @@ public struct InputSessionID: Hashable, Sendable {
         guard let app = application, let element = focused,
             let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
                 excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())),
-            !geometry.isComposing, expectedSession == nil || expectedSession == session else { return false }
+            geometry.isComposing == false, expectedSession == nil || expectedSession == session else { return false }
         if let range {
             guard let caret = geometry.selectedRange?.location, range.location >= 0,
                 range.length >= 0, range.length <= Int.max - range.location,
@@ -455,13 +469,25 @@ protocol PasteboardWriting {
     func writeString(_ text: String)
 }
 
+@MainActor protocol PasteboardReading {
+    var changeCount: Int { get }
+    func readString() -> String?
+}
+
 /// Watches the general pasteboard for user copies. Polling `changeCount` is
 /// a cheap integer comparison; the string is read only when it actually
 /// changed. Used by the clipboard translation trigger.
 @MainActor final class PasteboardWatcher {
     var onCopy: ((String) -> Void)?
+    var permitsRead: () -> Bool = { false }
     private var timer: Timer?
-    private var lastChangeCount = NSPasteboard.general.changeCount
+    private let pasteboard: any PasteboardReading
+    private var lastChangeCount: Int
+
+    init(pasteboard: any PasteboardReading = SystemPasteboard()) {
+        self.pasteboard = pasteboard
+        lastChangeCount = pasteboard.changeCount
+    }
 
     func start(interval: TimeInterval = 0.25) {
         guard timer == nil else { return }
@@ -477,21 +503,23 @@ protocol PasteboardWriting {
     /// Aligns the baseline with the current pasteboard so an app-initiated
     /// copy (the overlay copy button) does not trigger a translation.
     func resyncBaseline() {
-        lastChangeCount = NSPasteboard.general.changeCount
+        lastChangeCount = pasteboard.changeCount
     }
-    private func check() {
-        let pasteboard = NSPasteboard.general
+    func check() {
         guard pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
-        guard let text = pasteboard.string(forType: .string)?
+        guard permitsRead() else { return }
+        guard let text = pasteboard.readString()?
             .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
         else { return }
         onCopy?(text)
     }
 }
 
-struct SystemPasteboard: PasteboardWriting {
-    func writeString(_ text: String) {
+struct SystemPasteboard: PasteboardWriting, PasteboardReading {
+    var changeCount: Int { NSPasteboard.general.changeCount }
+    func readString() -> String? { NSPasteboard.general.string(forType: .string) }
+    nonisolated func writeString(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)

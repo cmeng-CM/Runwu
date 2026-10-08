@@ -61,7 +61,7 @@ flowchart LR
 | 设置和使用说明 | `SettingsUI.swift`、`L10n.swift`、`README.md`；模型编辑仅模型服务显示，网页数据去向/有道源自动识别说明，默认跟随开关、固定卡控制的准确作用，中英文文案 |
 | 回归与本地产物 | `Tests/PicoTests` 覆盖安全读取、位置/内容状态、真实 SwiftUI host、路由及 HTTP 夹具；发布脚本产物包含许可证与图标署名 |
 
-T1—T5 已逐任务独立审查通过。T6 最终全量 235 项，1 项联网探测默认跳过，0 失败；原失败因果组合（浮窗+网页协议）68 项、1 跳过、0 失败。release 构建与 `codesign --verify --deep --strict 润物.app` 通过；产物为本地 ad-hoc 签名，身份 com.comeg.runwu，LICENSE 与图标署名逐字匹配源文件。真实应用人工验收仍待使用反馈；未启动或安装应用。生产苹果原生 session/语言包和用户模型端点未实测，不用注入引擎测试替代这些结论。
+T1—T6 已逐任务独立审查通过；整体终审 I-01/I-02 在 T7 统一修复组合读取错误与自动剪贴板读前排除边界。T7 最终全量共 242 项，其中 1 项联网探测默认跳过，0 失败；新增组合故障/恢复及剪贴板读前准入回归。T6 原失败因果组合（浮窗+网页协议）68 项、1 跳过、0 失败。release 构建与 `codesign --verify --deep --strict 润物.app` 通过；产物为本地 ad-hoc 签名，身份 com.comeg.runwu，LICENSE 与图标署名逐字匹配源文件。真实应用人工验收仍待使用反馈；未启动或安装应用。生产苹果原生 session/语言包和用户模型端点未实测，不用注入引擎测试替代这些结论。
 
 ## 已知限制
 
@@ -115,13 +115,15 @@ T1—T5 已逐任务独立审查通过。T6 最终全量 235 项，1 项联网�
 | D-21 | 错误使用独立只读 notice，取消/过期静默；失败清对应 pending 操作且不成为翻译数据 | 不写历史、朗读、复制或替换，live/clipboard 错误彼此隔离 |
 | D-22 | follow 设置默认 true，单独持久化呈现回调；固定位置/边距仍可配置剪贴板和预览 | 模式切换不重配服务、不重译；固定控制不影响跟随中的实时卡，模型 UI 仅 languageModel |
 | D-23 | 活动卡和透明测量非激活 panel 明确 animationBehavior=.none | macOS27 全量及浮窗+网页组合采样复现 64 个 NSAnimation 阻塞 worker，饿死夹具回调；移除系统出现/消失视觉过渡，保留布局/固定/跟随/钉住/计时及原测试，不改未证明参与的其他窗口 |
+| D-24 | marked AX 查询保留未知状态；attributeUnsupported/noValue 保持正常缺失兼容，其余 API 错误或预算耗尽不能当未组合 | 未知采样不读 AXValue、不使用快捷键缓存，同步刷新输入会话并取消旧防抖/请求身份、清去重；独立几何仍发布，后续可信同 text/range 可恢复，不伪造一次提交 |
+| D-25 | 自动剪贴板 watcher 和 App 自动入口共享读前 enabled/模式/排除准入，读取器与前台身份可注入 | 拒绝仍推进 changeCount，离开排除应用不补读旧内容；禁止先获取字符串再过滤。显式快捷键保留用户授权语义，不新增剪贴板安全框识别范围 |
 
 ## 接口与数据形状
 
 | 接口 | 契约 |
 | --- | --- |
 | TextSnapshot | caretFrame: NSRect?、isComposing: Bool 默认值，UTF-16 selectedRange；组合/几何读取在文本+range 去重前 |
-| InputAnchor / onAnchorChanged | caretFrame / fieldFrame 全局 Cocoa 坐标，携带 InputSessionID；同步会话/安全失效后才能读新原文 |
+| InputAnchor / onAnchorChanged | caretFrame / fieldFrame 全局 Cocoa 坐标，携带 InputSessionID；同步会话/安全失效后才能读新原文；内部 Geometry.isComposing 为 Bool?，nil 表示 marked 查询不可信，独立锚点不被该错误阻断 |
 | ExtractedSentence | 当前句原文与真实 UTF-16 range，版本键包含位置；禁止从重复原文反向猜最后一处 |
 | RealtimeTranslationState | 请求身份、会话、句子版本及配置代次共同校验；切框/应用/空值/当前句变化同步清旧结果 |
 | Overlay origin / anchor | realtime(session) 与 clipboard 分离；接受结果使用最新同 session anchor，更新锚点不重置隐藏计时 |
@@ -132,6 +134,7 @@ T1—T5 已逐任务独立审查通过。T6 最终全量 235 项，1 项联网�
 | TranslationCoordinator | reconfigure(from:to:revision:) 原子取消、清缓存及更新方向/代次；translateThrowing 接受 caller revision，旧值取消 |
 | TranslationService / App readiness | 完整不可变 engine 快照；App 串行 configurationTask 完成两 coordinator 和 service 更新后才允许该 revision 请求 |
 | TranslationHostConfiguration | source、target、单调 generation；holder 同 pair 不 reset，真实方向改变发布新值；SwiftUI 子树按 generation 重建，旧 task 不可 late attach |
+| PasteboardReading / PasteboardWatcher | 可注入 changeCount 与 readString；watcher 先推进基线、再 permitsRead、最后读字符串；App 自动入口读前执行同策略，拒绝同步基线；显式操作维持既有 enabled 开关 |
 | 错误 | 受控网络/HTTP/协议/空结果分类；独立只读短提示，取消/过期静默；诊断不记录原文/密钥或任意错误描述 |
 
 ## 兼容迁移与回滚

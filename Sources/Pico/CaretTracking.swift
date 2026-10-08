@@ -150,7 +150,8 @@ struct AXFieldReader {
     struct Geometry {
         let anchor: InputAnchor
         let selectedRange: NSRange?
-        let isComposing: Bool
+        // nil is an unreadable composition state, never an implicit commit.
+        let isComposing: Bool?
     }
 
     func safe(_ element: AXUIElement, pid: pid_t) -> Bool {
@@ -208,8 +209,9 @@ struct AXFieldReader {
         layout: InputScreenLayout) -> Geometry? {
         guard !excluded.contains(bundleID ?? ""), safe(element, pid: pid), editable(element) else { return nil }
         let selected = range(access.attribute(element, kAXSelectedTextRangeAttribute as String))
-        let marked = range(access.attribute(element, "AXTextInputMarkedRange"))
-        let composing = marked.map { $0.length > 0 } ?? false
+        let marked = access.readAttribute(element, "AXTextInputMarkedRange")
+        let composing: Bool? = marked.permitsOptionalMetadata
+            ? (range(marked.value).map { $0.length > 0 } ?? false) : nil
         let field = layout.fieldRect(elementFrame(element))
         let caret = caretFrame(element, selected: selected, field: field, layout: layout)
         return Geometry(anchor: InputAnchor(caretFrame: caret, fieldFrame: field),
