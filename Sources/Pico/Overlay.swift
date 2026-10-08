@@ -631,6 +631,7 @@ struct OverlayFollowingLayout {
         let panel = OverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 64), styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false)
+        panel.animationBehavior = .none
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .floating
@@ -715,6 +716,7 @@ struct OverlayFollowingLayout {
         let panel = NSPanel(
             contentRect: NSRect(x: -20000, y: -20000, width: 600, height: 100),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.animationBehavior = .none
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.alphaValue = 0

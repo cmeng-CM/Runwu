@@ -82,6 +82,21 @@ enum L10n {
     static func backendLanguageModel(_ lang: UILanguage) -> String {
         lang == .chinese ? "大语言模型 API" : "Language Model API"
     }
+    static func localTranslationHint(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "苹果翻译在本机运行。首次准备源语言和目标语言包可能需要联网下载。"
+            : "Apple translation runs on this Mac. Preparing source and target language packs may require a download."
+    }
+    static func webTranslationHint(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "网页翻译无需 API 密钥，会将当前待译文本发送到所选服务。需要网络；限流、网络条件或网页协议变化可能导致失败。"
+            : "Web translation needs no API key and sends the current text to the selected service. It requires a network connection; rate limits, network conditions or protocol changes can cause failures."
+    }
+    static func youdaoSourceHint(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "有道自动识别原文语言，并使用所选目标语言。源语言仍用于应用内的输入筛选。"
+            : "Youdao detects the source language automatically and uses the selected target language. Source Language still filters input locally."
+    }
     static func sourceLanguage(_ lang: UILanguage) -> String {
         lang == .chinese ? "源语言" : "Source Language"
     }
@@ -460,6 +475,26 @@ enum L10n {
     }
 
     // MARK: - Overlay appearance
+
+    static func followInsertionCaret(_ lang: UILanguage) -> String {
+        lang == .chinese ? "跟随文字插入光标" : "Follow Insertion Caret"
+    }
+    static func fixedDisplayPosition(_ lang: UILanguage) -> String {
+        lang == .chinese ? "固定卡位置（含剪贴板）" : "Fixed Card Position (including Clipboard)"
+    }
+    static func fixedEdgeDistance(_ lang: UILanguage) -> String {
+        lang == .chinese ? "固定卡边距" : "Fixed Card Edge Distance"
+    }
+    static func followCaretHint(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "跟随仅移动未钉住的实时卡，不重新翻译或延长隐藏计时。光标不可用时退到输入框；两者都不可用时暂时隐藏，可用后恢复仍存活的卡。"
+            : "Following moves only the unpinned live card, without translating again or extending its hide timer. It falls back to the input field; with neither anchor available, a still-active card hides until an anchor returns."
+    }
+    static func fixedPlacementHint(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "位置与边距用于固定卡的自动布局：关闭跟随后的实时卡、剪贴板卡和预览卡。跟随中的实时卡不使用这些位置设置；手动移动或钉住的卡保留各自位置。"
+            : "Position and edge distance control automatic placement of fixed cards: live cards with following off, clipboard cards and previews. They do not position a following live card; manually moved or pinned cards retain their positions."
+    }
 
     static func overlayOpacity(_ lang: UILanguage) -> String {
         lang == .chinese ? "悬浮窗透明度" : "Overlay Transparency"

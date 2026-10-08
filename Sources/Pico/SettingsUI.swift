@@ -761,6 +761,17 @@ struct SettingsView: View {
                     }
                 }
             }
+            if settings.translationBackend == .local {
+                Text(L10n.localTranslationHint(lang))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if settings.translationBackend != .languageModel {
+                Text(L10n.webTranslationHint(lang))
+                    .font(.caption).foregroundStyle(.secondary)
+                if settings.translationBackend == .youdao {
+                    Text(L10n.youdaoSourceHint(lang))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             SettingsGroup(title: L10n.groupLanguagesTitle(lang)) {
                 SettingsRow(label: L10n.sourceLanguage(lang)) {
                     TrailingPicker(width: 160, selection: Binding(
@@ -815,7 +826,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            if settings.translationBackend != .local {
+            if settings.translationBackend == .languageModel {
                 modelSettingsSection
             }
             SettingsGroup(title: L10n.groupActions(lang)) {
@@ -1007,7 +1018,10 @@ struct SettingsView: View {
     private var overlayPage: some View {
         VStack(alignment: .leading, spacing: 20) {
             SettingsGroup(title: L10n.groupPosition(lang)) {
-                SettingsRow(label: L10n.displayPosition(lang), divider: false) {
+                SettingsRow(label: L10n.followInsertionCaret(lang)) {
+                    smallToggle($settings.overlayFollowCaret)
+                }
+                SettingsRow(label: L10n.fixedDisplayPosition(lang)) {
                     OverlayPositionPicker(
                         selection: Binding(
                             get: { settings.overlayPosition },
@@ -1017,19 +1031,7 @@ struct SettingsView: View {
                             }),
                         language: lang)
                 }
-            }
-            SettingsGroup(title: L10n.groupAppearance(lang)) {
-                SettingsRow(label: L10n.textSize(lang)) {
-                    TrailingPicker(width: 160, selection: Binding(
-                        get: { settings.textSize },
-                        set: {
-                            settings.textSize = $0
-                            state.overlay.textSize = $0
-                        })) {
-                        ForEach(OverlayTextSize.allCases, id: \.self) { Text($0.displayName(for: lang)).tag($0) }
-                    }
-                }
-                SettingsRow(label: L10n.edgeDistance(lang)) {
+                SettingsRow(label: L10n.fixedEdgeDistance(lang), divider: false) {
                     HStack(spacing: 8) {
                         Slider(
                             value: Binding(
@@ -1042,6 +1044,22 @@ struct SettingsView: View {
                         Text("\(Int(settings.overlayEdgeDistance))")
                             .monospacedDigit()
                             .frame(width: 36, alignment: .trailing)
+                    }
+                }
+            }
+            Text(L10n.followCaretHint(lang))
+                .font(.caption).foregroundStyle(.secondary)
+            Text(L10n.fixedPlacementHint(lang))
+                .font(.caption).foregroundStyle(.secondary)
+            SettingsGroup(title: L10n.groupAppearance(lang)) {
+                SettingsRow(label: L10n.textSize(lang)) {
+                    TrailingPicker(width: 160, selection: Binding(
+                        get: { settings.textSize },
+                        set: {
+                            settings.textSize = $0
+                            state.overlay.textSize = $0
+                        })) {
+                        ForEach(OverlayTextSize.allCases, id: \.self) { Text($0.displayName(for: lang)).tag($0) }
                     }
                 }
                 SettingsRow(label: L10n.overlayOpacity(lang)) {
