@@ -54,7 +54,7 @@ flowchart LR
 
 ## 已知限制
 
-辅助功能及定位依赖宿主应用。text-marker 不是稳定公开跨应用契约，需回退。苹果翻译需语言包。网页服务可能限流、变更或受地区网络影响，失败须显式呈现。2026-10-08 调研固定短句探测：Google 与有道成功，Bing 返回 401 或空响应。协议接入不等于上游实时可用。自动化固定坐标/HTTP 夹具不证明全部应用兼容；真实应用问题由用户使用反馈推进。
+辅助功能及定位依赖宿主应用。text-marker 不是稳定公开跨应用契约，需回退。苹果翻译需语言包。网页服务可能限流、变更或受地区网络影响，失败须显式呈现。2026-10-08 调研固定短句探测：Google 与有道成功，Bing 返回 401 或空响应。协议接入不等于上游实时可用。2026-10-08 请求对照确认：有道免费句子端点显式 from=zh-CHS 返回 code50，from=auto 成功；适配器采用源语言自动识别、目标语言显式指定，应用源语言仍用于本地输入筛选。自动化固定坐标/HTTP 夹具不证明全部应用兼容；真实应用问题由用户使用反馈推进。
 
 ## 验收标准
 
@@ -82,6 +82,7 @@ flowchart LR
 | D-08 | 中英对应，位置不等待翻译 | 用户 | 请求/会话身份校验 |
 | D-09 | 系统框架、独立协议实现 | agent | 不引入第三方依赖或复制 GPL |
 | D-10 | 润物安装名称、com.comeg.runwu 独立身份、本地签名 | 用户 | 用户 2026-10-08 明确指定名称与 Bundle ID；避免原 Pico 安装/更新冲突 |
+| D-11 | 有道网页源语言自动识别、目标显式指定 | agent | 固定短句仅改变 from 字段的实测差异；不以官网语言表误推断请求能力 |
 
 ## 接口与数据形状
 
@@ -91,7 +92,7 @@ flowchart LR
 | InputAnchor | caretFrame: NSRect?、fieldFrame: NSRect?，全局 Cocoa 坐标 |
 | onAnchorChanged | ((InputAnchor, InputSessionID) -> Void)?，几何事件在文本去重前发出 |
 | 锚点更新 | 与译文 show 分离，仅移动当前活动卡，不重置隐藏计时 |
-| TranslationEngine | translate(_ text: String, from: Language, to: Language) async throws -> String |
+| TranslationEngine | translate(_ text: String, from: Language, to: Language) async throws -> String；有道内部采用源自动识别，应用输入筛选与目标语言不变 |
 | TranslationBackend | 保留 local/languageModel，增加 google/bing/youdao |
 | 请求身份 | 会话、句子版本、配置代次匹配方可接受 |
 | 错误 | 区分网络/HTTP/协议/空结果，取消不显示为失败 |
