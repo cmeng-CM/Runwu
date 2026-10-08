@@ -68,16 +68,20 @@ public struct TextSnapshot: Sendable {
     /// Screen-space frame (Cocoa coordinates) of the focused text field, used
     /// to keep the overlay from covering the text being typed.
     public let fieldFrame: NSRect?
+    public let caretFrame: NSRect?
+    public let isComposing: Bool
     public let timestamp: Date
     public init(
         pid: pid_t, bundleIdentifier: String?, text: String, selectedRange: NSRange?, fieldFrame: NSRect? = nil,
-        timestamp: Date = .now
+        caretFrame: NSRect? = nil, isComposing: Bool = false, timestamp: Date = .now
     ) {
         self.pid = pid
         self.bundleIdentifier = bundleIdentifier
         self.text = text
         self.selectedRange = selectedRange
         self.fieldFrame = fieldFrame
+        self.caretFrame = caretFrame
+        self.isComposing = isComposing
         self.timestamp = timestamp
     }
 }
@@ -287,6 +291,7 @@ public struct LanguageTextDetector: Sendable {
 
 enum ShortcutSnapshotRecovery {
     static func resolve(live: TextSnapshot, lastGoodText: String?, sourceLanguage: Language = .chinese) -> TextSnapshot {
+        guard !live.isComposing else { return live }
         let extractor = SentenceExtractor()
         let detector = LanguageTextDetector()
         if detector.contains(extractor.extract(from: live), language: sourceLanguage) {
@@ -299,6 +304,8 @@ enum ShortcutSnapshotRecovery {
             text: lastGoodText,
             selectedRange: NSRange(location: (lastGoodText as NSString).length, length: 0),
             fieldFrame: live.fieldFrame,
+            caretFrame: live.caretFrame,
+            isComposing: live.isComposing,
             timestamp: live.timestamp)
         guard detector.contains(extractor.extract(from: recovered), language: sourceLanguage) else { return live }
         return recovered

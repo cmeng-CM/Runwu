@@ -66,7 +66,12 @@ public struct InputSessionID: Hashable, Sendable {
             reset()
             return
         }
+        if let previous = self.session, previous != session { reset() }
         self.session = session
+        if snapshot.isComposing {
+            debouncer.cancel()
+            return
+        }
         if snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             debouncer.cancel()
             lastSentence = ""
@@ -90,6 +95,11 @@ public struct InputSessionID: Hashable, Sendable {
     }
     func translateNow(_ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?) {
         guard isEnabled else { return }
+        guard !snapshot.isComposing, !excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "") else {
+            debouncer.cancel()
+            return
+        }
+        if let previous = self.session, previous != session { reset() }
         self.session = session
         emit(snapshot, session: session, screen: screen, force: true)
     }
@@ -103,6 +113,8 @@ public struct InputSessionID: Hashable, Sendable {
     private func emit(
         _ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?, force: Bool = false
     ) {
+        guard isEnabled, !snapshot.isComposing, !excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "")
+        else { return }
         let sentence = extractor.extract(from: snapshot)
         DiagnosticLog.write(
             "debounce fired sentenceLength=\(sentence.count) source=\(sourceLanguage.rawValue) matches=\(detector.contains(sentence, language: sourceLanguage))")
@@ -124,344 +136,266 @@ public struct InputSessionID: Hashable, Sendable {
 }
 
 @MainActor final class AccessibilityMonitor {
-    private let logger = Logger(subsystem: "com.comeg.runwu", category: "accessibility")
     var onSnapshot: ((TextSnapshot, InputSessionID, NSScreen?) -> Void)?
+    var onAnchorChanged: ((InputAnchor, InputSessionID) -> Void)?
+    var onFocusChanged: (() -> Void)?
     var excludedBundleIDs: Set<String> = []
     var sourceLanguage: Language = .chinese
-    var onFocusChanged: (() -> Void)?
-    private var appObserver: NSObjectProtocol?, elementObserver: AXObserver?, pollTimer: Timer?, focused: AXUIElement?,
-        lastText: String?, lastGoodText: String?, lastSelectedRange: NSRange?, session = InputSessionID(pid: 0)
-    private var focusedApp: AXUIElement?
-    /// Screen frame of the focused text field, read once per focus change.
-    /// Reading it on every snapshot costs extra AX round-trips on every
-    /// keystroke, which is noticeable against slow accessibility apps.
-    private var focusedFieldFrame: NSRect?
+    private let reader: AXFieldReader
+    private let currentApplication: () -> MonitoredApplication?
+    private let screenFrames: () -> [NSRect]
+    private var appObserver: NSObjectProtocol?, elementObserver: AXObserver?, pollTimer: Timer?
+    private var focused: AXUIElement?, focusedApp: AXUIElement?, observedWindow: AXUIElement?
+    private var application: MonitoredApplication?
+    private var session = InputSessionID(pid: 0)
+    private var lastText: String?, lastGoodText: String?, lastSelectedRange: NSRange?, lastComposing: Bool?
+    private var lastAnchor: InputAnchor?
     private(set) var isRunning = false
-    /// 最近一次前台的非 Runwu 应用，是诊断探针的目标（设置窗打开时 Runwu 自己才是前台应用）。
     private(set) var lastExternalApp: (pid: pid_t, bundleID: String)?
-    private var lastResolvedProbe = Date.distantPast
+
+    init(access: AXFieldAccess = .live,
+        currentApplication: @escaping () -> MonitoredApplication? = {
+            NSWorkspace.shared.frontmostApplication.map {
+                MonitoredApplication(pid: $0.processIdentifier, bundleID: $0.bundleIdentifier)
+            }
+        }, screenFrames: @escaping () -> [NSRect] = { NSScreen.screens.map(\.frame) }) {
+        reader = AXFieldReader(access: access.bounded())
+        self.currentApplication = currentApplication
+        self.screenFrames = screenFrames
+    }
+
     func start() {
         guard AXIsProcessTrusted() else {
             DiagnosticLog.write("AX trust check failed")
-            NSLog("Runwu AX trust check failed")
-            logger.error("AX trust check failed")
             return
         }
         guard !isRunning else { return }
         isRunning = true
         DiagnosticLog.write("monitor starting")
-        NSLog("Runwu monitor starting")
-        logger.info("monitor starting")
         appObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            DispatchQueue.main.async { [weak self] in self?.focusApplication(NSWorkspace.shared.frontmostApplication) }
+            DispatchQueue.main.async { [weak self] in self?.readSnapshot() }
         }
-        focusApplication(NSWorkspace.shared.frontmostApplication)
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        readSnapshot()
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.readSnapshot() }
         }
+        pollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
+
     func stop() {
         if let appObserver { NSWorkspace.shared.notificationCenter.removeObserver(appObserver) }
         appObserver = nil
         pollTimer?.invalidate()
         pollTimer = nil
         removeObserver()
+        application = nil
+        focusedApp = nil
+        setFocused(nil, force: true)
         isRunning = false
     }
-    private func focusApplication(_ app: NSRunningApplication?) {
-        guard let app else { return }
-        removeObserver()
-        let pid = app.processIdentifier
-        session = InputSessionID(pid: pid)
-        if app.bundleIdentifier != Bundle.main.bundleIdentifier {
-            lastExternalApp = (pid: pid, bundleID: app.bundleIdentifier ?? "unknown")
-        }
-        DiagnosticLog.write("focused app pid=\(pid) bundle=\(app.bundleIdentifier ?? "unknown")")
-        logger.info(
-            "focused app pid=\(pid, privacy: .public) bundle=\(app.bundleIdentifier ?? "unknown", privacy: .public)")
-        onFocusChanged?()
-        let appElement = AXUIElementCreateApplication(pid)
-        focusedApp = appElement
-        // Chromium-based apps (WPS, Chrome, Edge…) build their accessibility
-        // tree lazily; nudging these attributes makes them expose it.
-        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        observe(appElement, app: appElement, appInfo: app)
-        refreshFocusedElement(app: app)
-    }
-    private func refreshFocusedElement(app: NSRunningApplication) {
-        guard !excludedBundleIDs.contains(app.bundleIdentifier ?? "") else {
-            focused = nil
-            focusedFieldFrame = nil
-            lastGoodText = nil
+
+    private func refreshCurrentFocus() {
+        guard let app = currentApplication() else {
+            if application != nil {
+                removeObserver()
+                application = nil
+                focusedApp = nil
+                setFocused(nil, force: true)
+            }
             return
         }
-        guard let focusedApp else { return }
-        var value: CFTypeRef?
-        _ = AXUIElementCopyAttributeValue(focusedApp, kAXFocusedUIElementAttribute as CFString, &value)
-        var element: AXUIElement? = value == nil ? nil : (value! as! AXUIElement)
-        if element == nil {
-            let system = AXUIElementCreateSystemWide()
-            var hit: AXUIElement?
-            // AX position APIs take top-left-origin global coordinates, while
-            // NSEvent.mouseLocation is bottom-left-origin; convert before the
-            // hit test or the fallback probes the mirrored point.
-            let mouse = NSEvent.mouseLocation
-            let desktopTop = NSScreen.screens.map { $0.frame.maxY }.max() ?? mouse.y
-            let result = AXUIElementCopyElementAtPosition(system, Float(mouse.x), Float(desktopTop - mouse.y), &hit)
-            if result == .success {
-                element = hit
-                DiagnosticLog.write("focused fallback elementAtPosition bundle=\(app.bundleIdentifier ?? "unknown")")
-            } else {
-                DiagnosticLog.write(
-                    "focused element unavailable bundle=\(app.bundleIdentifier ?? "unknown") status=\(result.rawValue)")
+        if application?.pid != app.pid || application?.bundleID != app.bundleID {
+            removeObserver()
+            application = app
+            focusedApp = AXUIElementCreateApplication(app.pid)
+            setFocused(nil, force: true)
+            if app.bundleID != Bundle.main.bundleIdentifier {
+                lastExternalApp = (pid: app.pid, bundleID: app.bundleID ?? "unknown")
+            }
+            if !excludedBundleIDs.contains(app.bundleID ?? ""), !reader.access.secureInputActive(),
+                let focusedApp {
+                reader.access.enableAccessibility(focusedApp)
+                if isRunning { observeApplication(focusedApp, pid: app.pid) }
             }
         }
-        guard let element else {
-            focused = nil
-            focusedFieldFrame = nil
-            lastGoodText = nil
+        guard !excludedBundleIDs.contains(app.bundleID ?? ""), !reader.access.secureInputActive(),
+            let focusedApp else {
+            setFocused(nil)
             return
         }
-        logElementDetails(element, prefix: "focused element bundle=\(app.bundleIdentifier ?? "unknown")")
-        let resolved = resolveTextElement(from: element, depth: 5)
-        if let resolved {
-            if let focused, !CFEqual(focused, resolved) {
-                lastGoodText = nil
-                lastText = nil
-                lastSelectedRange = nil
-            }
-            focused = resolved
-            focusedFieldFrame = readElementFrame(resolved)
-            logElementDetails(resolved, prefix: "resolved text element")
-            observeValue(on: resolved)
+        let raw = reader.access.attribute(focusedApp, kAXFocusedUIElementAttribute as String)
+        var candidate: AXUIElement?
+        if let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() {
+            candidate = (raw as! AXUIElement)
         } else {
-            focused = nil
-            focusedFieldFrame = nil
-            lastGoodText = nil
-            DiagnosticLog.write("no supported text element found bundle=\(app.bundleIdentifier ?? "unknown")")
+            let point = InputScreenLayout(frames: screenFrames()).axPoint(NSEvent.mouseLocation)
+            if let hit = reader.access.hitTest(point), reader.safe(hit, pid: app.pid),
+                reader.access.attribute(hit, kAXFocusedAttribute as String) as? Bool == true {
+                candidate = hit
+            }
         }
+        let resolved = candidate.flatMap { reader.resolve($0, pid: app.pid) }
+        setFocused(resolved)
     }
-    private func resolveTextElement(from element: AXUIElement, depth: Int) -> AXUIElement? {
-        if isSupportedEditable(element) { return element }
-        guard depth > 0 else { return nil }
-        var children: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
-            let list = children as? [AXUIElement]
-        else { return nil }
-        for child in list { if let match = resolveTextElement(from: child, depth: depth - 1) { return match } }
-        return nil
+
+    private func setFocused(_ element: AXUIElement?, force: Bool = false) {
+        let same = focused == nil && element == nil
+            || focused.flatMap { old in element.map { CFEqual(old, $0) } } == true
+        guard force || !same else { return }
+        unobserveField()
+        focused = element
+        session = InputSessionID(pid: application?.pid ?? 0)
+        lastText = nil
+        lastGoodText = nil
+        lastSelectedRange = nil
+        lastComposing = nil
+        lastAnchor = nil
+        onFocusChanged?()
+        if isRunning, let element { observeField(element) }
     }
-    private func isSupportedEditable(_ element: AXUIElement) -> Bool {
-        var role: CFTypeRef?
-        var subrole: CFTypeRef?
-        var editable: CFTypeRef?
-        _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
-        _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
-        _ = AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editable)
-        let roleString = role as? String ?? ""
-        let subroleString = subrole as? String ?? ""
-        if subroleString == kAXSecureTextFieldSubrole as String || subroleString == "AXPasswordField" { return false }
-        return (editable as? Bool == true)
-            || [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String].contains(roleString)
-    }
-    private func observe(_ element: AXUIElement, app: AXUIElement, appInfo: NSRunningApplication) {
-        let result = AXObserverCreate(appInfo.processIdentifier, callback, &elementObserver)
-        guard result == .success, let observer = elementObserver else { return }
-        AXObserverAddNotification(
-            observer, app, kAXFocusedUIElementChangedNotification as CFString, Unmanaged.passUnretained(self).toOpaque()
-        )
+
+    private func observeApplication(_ element: AXUIElement, pid: pid_t) {
+        guard AXObserverCreate(pid, callback, &elementObserver) == .success,
+            let observer = elementObserver else { return }
+        AXObserverAddNotification(observer, element, kAXFocusedUIElementChangedNotification as CFString,
+            Unmanaged.passUnretained(self).toOpaque())
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
     }
-    private func observeValue(on element: AXUIElement) {
+    private static let fieldNotifications = [
+        kAXValueChangedNotification as String, kAXSelectedTextChangedNotification as String,
+        kAXMovedNotification as String, kAXResizedNotification as String,
+        "AXLayoutChanged", "AXScrollPositionChanged",
+    ]
+    private static let windowNotifications = [kAXMovedNotification as String, kAXResizedNotification as String]
+    private func observeField(_ element: AXUIElement) {
         guard let observer = elementObserver else { return }
-        AXObserverAddNotification(
-            observer, element, kAXValueChangedNotification as CFString, Unmanaged.passUnretained(self).toOpaque())
+        for name in Self.fieldNotifications {
+            AXObserverAddNotification(observer, element, name as CFString, Unmanaged.passUnretained(self).toOpaque())
+        }
+        if let window = reader.access.attribute(element, kAXWindowAttribute as String),
+            CFGetTypeID(window) == AXUIElementGetTypeID() {
+            observedWindow = (window as! AXUIElement)
+            for name in Self.windowNotifications {
+                AXObserverAddNotification(observer, observedWindow!, name as CFString,
+                    Unmanaged.passUnretained(self).toOpaque())
+            }
+        }
+    }
+    private func unobserveField() {
+        guard let observer = elementObserver else { return }
+        if let focused {
+            for name in Self.fieldNotifications { AXObserverRemoveNotification(observer, focused, name as CFString) }
+        }
+        if let observedWindow {
+            for name in Self.windowNotifications {
+                AXObserverRemoveNotification(observer, observedWindow, name as CFString)
+            }
+        }
+        observedWindow = nil
     }
     private func removeObserver() {
+        unobserveField()
         if let observer = elementObserver {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         }
         elementObserver = nil
-        focused = nil
-        focusedApp = nil
-        focusedFieldFrame = nil
-        lastText = nil
-        lastGoodText = nil
-        lastSelectedRange = nil
-    }
-    func snapshotNow() -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)? {
-        let captured = readFocusedText(force: true)
-        let live = captured?.snapshot ?? TextSnapshot(
-            pid: session.pid, bundleIdentifier: nil, text: "", selectedRange: nil)
-        let resolved = ShortcutSnapshotRecovery.resolve(
-            live: live, lastGoodText: lastGoodText, sourceLanguage: sourceLanguage)
-        guard !resolved.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return (resolved, captured?.session ?? session, captured?.screen ?? NSScreen.main)
-    }
-    /// 诊断探针：检查最近前台的非 Runwu 应用现在能否读到文本元素。只报结论
-    /// 与角色名，绝不带走文本内容。这是「打字翻译没反应」类问题的第一线索：
-    /// 授权掉了什么都没得读；微信 4.1.5+/自绘应用则读不到文本元素。
-    func diagnosticProbe() -> String {
-        guard let target = lastExternalApp else { return "probe result=no_external_app_tracked" }
-        guard NSRunningApplication(processIdentifier: target.pid) != nil else {
-            return "probe target=\(target.bundleID) result=app_not_running"
-        }
-        let appElement = AXUIElementCreateApplication(target.pid)
-        // 目标应用若挂起，AX 调用默认可阻塞 6 秒；探针限 2 秒防设置窗被卡住
-        AXUIElementSetMessagingTimeout(appElement, 2.0)
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            appElement, kAXFocusedUIElementAttribute as CFString, &value)
-        guard status == .success, let focusedElement = value else {
-            return "probe target=\(target.bundleID) result=no_focused_element status=\(status.rawValue)"
-        }
-        guard let textElement = resolveTextElement(from: focusedElement as! AXUIElement, depth: 5)
-        else {
-            return
-                "probe target=\(target.bundleID) result=no_text_element (app may not expose accessibility, e.g. WeChat 4.1.5+)"
-        }
-        var role: CFTypeRef?
-        _ = AXUIElementCopyAttributeValue(textElement, kAXRoleAttribute as CFString, &role)
-        return "probe target=\(target.bundleID) result=text_element_found role=\(role as? String ?? "unknown")"
     }
 
     func readSnapshot() {
-        // Chromium apps build their AX tree asynchronously after the nudge;
-        // keep re-probing while no text element has been resolved yet.
-        if focused == nil, Date().timeIntervalSince(lastResolvedProbe) > 2,
-            let app = NSWorkspace.shared.frontmostApplication {
-            lastResolvedProbe = Date()
-            refreshFocusedElement(app: app)
-        }
-        _ = readFocusedText(force: false)
-    }
-    private func readFocusedText(force: Bool) -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)?
-    {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-            !excludedBundleIDs.contains(app.bundleIdentifier ?? "")
-        else { return nil }
-        guard let element = focused else { return nil }
-        guard let live = readElementText(element) else { return nil }
-        let text = live.text
-        let selected = live.selected
-        let hasContent = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if !hasContent {
-            guard force else { return nil }
-        } else {
-            if !force, text == lastText, selected == lastSelectedRange { return nil }
-            lastGoodText = text
-            lastText = text
-            lastSelectedRange = selected
-        }
-        DiagnosticLog.write("AXValue read success length=\(text.count)")
-        logger.info("AXValue read success length=\(text.count, privacy: .public)")
-        let screen = NSScreen.main
-        let snapshot = TextSnapshot(
-            pid: session.pid, bundleIdentifier: app.bundleIdentifier, text: text, selectedRange: selected,
-            fieldFrame: focusedFieldFrame)
-        if !force {
-            onSnapshot?(snapshot, session, screen)
-        }
-        return (snapshot, session, screen)
+        reader.access.beginRead()
+        refreshCurrentFocus()
+        _ = capture(force: false)
     }
 
-    private func readElementText(_ element: AXUIElement) -> (text: String, selected: NSRange?)? {
-        var selected: NSRange?
-        var range: CFTypeRef?
-        _ = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &range)
-        if let range {
-            var r = CFRange()
-            let ax = range as! AXValue
-            if AXValueGetValue(ax, .cfRange, &r) { selected = NSRange(location: r.location, length: r.length) }
+    private func capture(force: Bool) -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)? {
+        guard let app = application, currentApplication()?.pid == app.pid, let element = focused,
+            let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
+                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())) else { return nil }
+        let capturedSession = session
+        // Independent geometry and composition precede text de-duplication.
+        if geometry.anchor != lastAnchor {
+            lastAnchor = geometry.anchor
+            onAnchorChanged?(geometry.anchor, capturedSession)
         }
-        var value: CFTypeRef?
-        let valueStatus = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
-        if valueStatus == .success, let text = value as? String,
-            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            return (text, selected)
-        }
-        if let ranged = stringForFullRange(element) {
-            return (ranged, selected)
-        }
-        if valueStatus == .success, let text = value as? String {
-            return (text, selected)
-        }
-        return nil
-    }
-
-    /// Screen-space frame (Cocoa coordinates) of the element. AX reports the
-    /// position in top-left-origin global coordinates, so the y axis is
-    /// converted against the desktop height before use by overlay placement.
-    private func readElementFrame(_ element: AXUIElement) -> NSRect? {
-        var positionRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        let positionStatus = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef)
-        let sizeStatus = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef)
-        guard positionStatus == .success, sizeStatus == .success, let positionRef, let sizeRef else { return nil }
-        var origin = CGPoint.zero
-        var size = CGSize.zero
-        let readOrigin = AXValueGetValue(positionRef as! AXValue, .cgPoint, &origin)
-        let readSize = AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
-        guard readOrigin, readSize else { return nil }
-        guard size.width > 0, size.height > 0 else { return nil }
-        let desktopTop = NSScreen.screens.map { $0.frame.maxY }.max() ?? 0
-        return NSRect(x: origin.x, y: desktopTop - origin.y - size.height, width: size.width, height: size.height)
-    }
-
-    private func stringForFullRange(_ element: AXUIElement) -> String? {        var countRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &countRef) == .success
-        else { return nil }
-        let count: Int
-        if let number = countRef as? NSNumber {
-            count = number.intValue
-        } else {
+        guard session == capturedSession else { return nil }
+        guard currentApplication()?.pid == app.pid, !excludedBundleIDs.contains(app.bundleID ?? ""),
+            reader.safe(element, pid: app.pid) else {
+            setFocused(nil)
             return nil
         }
-        guard count > 0 else { return nil }
-        var range = CFRange(location: 0, length: count)
-        guard let axRange = AXValueCreate(.cfRange, &range) else { return nil }
-        var stringRef: CFTypeRef?
-        let status = AXUIElementCopyParameterizedAttributeValue(
-            element, kAXStringForRangeParameterizedAttribute as CFString, axRange, &stringRef)
-        guard status == .success, let text = stringRef as? String,
-            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
-        return text
+        if force, geometry.isComposing { return nil }
+        let read = reader.text(element)
+        guard let text = read ?? ((force || geometry.isComposing) ? "" : nil) else { return nil }
+        let snapshot = TextSnapshot(pid: app.pid, bundleIdentifier: app.bundleID, text: text,
+            selectedRange: geometry.selectedRange, fieldFrame: geometry.anchor.fieldFrame,
+            caretFrame: geometry.anchor.caretFrame, isComposing: geometry.isComposing)
+        let point = geometry.anchor.caretFrame ?? geometry.anchor.fieldFrame
+        let screen = point.flatMap { rect in NSScreen.screens.first { $0.frame.contains(NSPoint(x: rect.midX, y: rect.midY)) } }
+        let changed = text != lastText || geometry.selectedRange != lastSelectedRange
+            || geometry.isComposing != lastComposing
+        if !text.isEmpty, !geometry.isComposing { lastGoodText = text }
+        lastText = text
+        lastSelectedRange = geometry.selectedRange
+        lastComposing = geometry.isComposing
+        if !force, changed { onSnapshot?(snapshot, capturedSession, screen) }
+        return (snapshot, capturedSession, screen)
+    }
+
+    func snapshotNow() -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)? {
+        reader.access.beginRead()
+        refreshCurrentFocus()
+        guard let captured = capture(force: true) else { return nil }
+        let recovered = ShortcutSnapshotRecovery.resolve(live: captured.snapshot,
+            lastGoodText: lastGoodText, sourceLanguage: sourceLanguage)
+        guard !recovered.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (recovered, captured.session, captured.screen)
+    }
+
+    func diagnosticProbe() -> String {
+        reader.access.beginRead()
+        guard let target = lastExternalApp else { return "probe result=no_external_app_tracked" }
+        guard !excludedBundleIDs.contains(target.bundleID), !reader.access.secureInputActive() else {
+            return "probe target=\(target.bundleID) result=protected_target"
+        }
+        guard NSRunningApplication(processIdentifier: target.pid) != nil else {
+            return "probe target=\(target.bundleID) result=app_not_running"
+        }
+        let app = AXUIElementCreateApplication(target.pid)
+        guard let raw = reader.access.attribute(app, kAXFocusedUIElementAttribute as String),
+            CFGetTypeID(raw) == AXUIElementGetTypeID(),
+            let field = reader.resolve(raw as! AXUIElement, pid: target.pid) else {
+            return "probe target=\(target.bundleID) result=no_text_element"
+        }
+        let rawRole = reader.access.attribute(field, kAXRoleAttribute as String) as? String
+        let knownRoles = [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String]
+        let role = rawRole.flatMap { knownRoles.contains($0) ? $0 : nil } ?? "unknown"
+        return "probe target=\(target.bundleID) result=text_element_found role=\(role)"
     }
 
     func replace(sourceWithTerminator: String, translation: String) -> Bool {
-        guard let element = focused else { return false }
-        var value: CFTypeRef?
-        let read = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
-        let current = read == .success ? value as? String : nil
-        return FocusedFieldReplacer.replace(
-            currentText: current, sourceWithTerminator: sourceWithTerminator, translation: translation
-        ) { text, caret in
-            let write = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
-            guard write == .success else { return false }
+        reader.access.beginRead()
+        refreshCurrentFocus()
+        guard let app = application, let element = focused,
+            let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
+                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())),
+            !geometry.isComposing else { return false }
+        let current = reader.text(element)
+        return FocusedFieldReplacer.replace(currentText: current, sourceWithTerminator: sourceWithTerminator,
+            translation: translation) { text, caret in
+            guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success
+            else { return false }
             var range = CFRange(location: caret, length: 0)
-            if let axRange = AXValueCreate(.cfRange, &range) {
-                _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axRange)
+            if let value = AXValueCreate(.cfRange, &range) {
+                AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
             }
             lastText = text
             lastGoodText = text
             lastSelectedRange = NSRange(location: caret, length: 0)
             return true
         }
-    }
-    private func logElementDetails(_ element: AXUIElement, prefix: String = "AX element") {
-        // 只记角色与子角色：完整属性列表一条就两 KB，会把诊断日志环挤满
-        var role: CFTypeRef?
-        var subrole: CFTypeRef?
-        _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
-        _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
-        DiagnosticLog.write(
-            "\(prefix) role=\(role as? String ?? "unknown") subrole=\(subrole as? String ?? "unknown")"
-        )
     }
 }
 
@@ -478,13 +412,7 @@ private func callback(
 }
 extension AccessibilityMonitor {
     fileprivate func readForCallback(_ name: String) {
-        if name == kAXFocusedUIElementChangedNotification as String,
-            let app = NSRunningApplication(processIdentifier: session.pid)
-        {
-            refreshFocusedElement(app: app)
-        } else {
-            readSnapshot()
-        }
+        readSnapshot()
     }
 }
 
