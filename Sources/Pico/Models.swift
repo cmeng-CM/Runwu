@@ -415,7 +415,19 @@ public actor TranslationCoordinator {
         task = nil
     }
 
+    private var configurationRevision: UInt64 = 0
+
+    /// One actor turn cancels in-flight work and invalidates every cache entry.
+    public func reconfigure(from source: Language, to target: Language, revision: UInt64) {
+        guard revision >= configurationRevision else { return }
+        configurationRevision = revision
+        sourceLanguage = source
+        targetLanguage = target
+        clearCache()
+    }
+
     public func clearCache() {
+        cancel()
         cache.removeAll(keepingCapacity: true)
         cacheOrder.removeAll(keepingCapacity: true)
     }
@@ -425,8 +437,16 @@ public actor TranslationCoordinator {
     }
 
     public func translate(_ text: String, from source: Language, to target: Language) async -> String? {
+        try? await translateThrowing(text, from: source, to: target)
+    }
+
+    public func translateThrowing(_ text: String, from source: Language, to target: Language,
+        revision: UInt64? = nil) async throws -> String {
+        try Task.checkCancellation()
+        let expected = revision ?? configurationRevision
+        guard expected == configurationRevision else { throw CancellationError() }
         let key = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return nil }
+        guard !key.isEmpty else { throw LLMTranslationError.emptyText }
         guard source != target else { return key }
         generation += 1
         let current = generation
@@ -437,12 +457,16 @@ public actor TranslationCoordinator {
         task = newTask
         do {
             let value = try await newTask.value
-            guard current == generation, !Task.isCancelled else { return nil }
+            guard current == generation, expected == configurationRevision, !Task.isCancelled else { throw CancellationError() }
+            guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw TranslationResultError.empty }
             storeInCache(cacheKey, value)
             return value
         } catch {
-            DiagnosticLog.write("translation error \(TranslationErrorDiagnostic(error).fields)")
-            return nil
+            guard current == generation, expected == configurationRevision, !Task.isCancelled,
+                !(error is CancellationError), (error as? URLError)?.code != .cancelled else { throw CancellationError() }
+            let fields = (error as? WebTranslationError)?.diagnosticFields ?? TranslationErrorDiagnostic(error).fields
+            DiagnosticLog.write("translation error \(fields)")
+            throw error
         }
     }
 
@@ -478,7 +502,7 @@ final class TranslationSessionHolder {
     private var sessionTarget: Language?
     private var requestedSource: Language = .chinese
     private var requestedTarget: Language = .english
-    private var waiters: [CheckedContinuation<TranslationSession, Error>] = []
+    private var waiters: [UUID: CheckedContinuation<TranslationSession, Error>] = [:]
 
     func attach(_ session: TranslationSession, source: Language, target: Language) {
         // A previous SwiftUI task can complete after its configuration has
@@ -488,42 +512,56 @@ final class TranslationSessionHolder {
         self.session = session
         sessionSource = source
         sessionTarget = target
-        let pending = waiters
+        let pending = Array(waiters.values)
         waiters.removeAll()
         pending.forEach { $0.resume(returning: session) }
     }
 
-    func configure(source: Language, target: Language) {
+    @discardableResult
+    func configure(source: Language, target: Language) -> Bool {
+        // The SwiftUI host reruns translationTask only when the language pair
+        // changes. Clearing an attached session on backend edits or resume
+        // would leave the same-pair local engine permanently unready.
+        guard requestedSource != source || requestedTarget != target else { return false }
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        pending.forEach { $0.resume(throwing: TranslationSessionError.unavailable) }
         requestedSource = source
         requestedTarget = target
         session = nil
         sessionSource = nil
         sessionTarget = nil
+        return true
     }
 
     func translate(_ text: String, from source: Language, to target: Language) async throws -> String {
-        try await readySession(from: source, to: target).translate(text).targetText
+        let session = try await readySession(from: source, to: target)
+        try Task.checkCancellation()
+        return try await session.translate(text).targetText
     }
 
     private func readySession(from source: Language, to target: Language) async throws -> TranslationSession {
+        try Task.checkCancellation()
         guard requestedSource == source, requestedTarget == target else {
             throw TranslationSessionError.unavailable
         }
         if let session, sessionSource == source, sessionTarget == target { return session }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append(continuation)
-            if waiters.count == 1 {
-                Task { await self.failWaitersIfStillEmpty() }
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                waiters[id] = continuation
+                Task { await self.failWaiterIfStillEmpty(id) }
             }
+        } onCancel: {
+            Task { @MainActor in self.waiters.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
         }
     }
 
-    private func failWaitersIfStillEmpty() async {
+    private func failWaiterIfStillEmpty(_ id: UUID) async {
         try? await Task.sleep(for: .seconds(8))
-        guard session == nil, !waiters.isEmpty else { return }
-        let pending = waiters
-        waiters.removeAll()
-        pending.forEach { $0.resume(throwing: TranslationSessionError.unavailable) }
+        guard session == nil else { return }
+        waiters.removeValue(forKey: id)?.resume(throwing: TranslationSessionError.unavailable)
     }
 }
 
@@ -534,41 +572,72 @@ struct HostedTranslationEngine: TranslationEngine, @unchecked Sendable {
     }
 }
 
-/// Switches between macOS's local translator and the ordered LLM router
-/// without rebuilding the coordinator while an input event is in flight.
-actor TranslationService: TranslationEngine {
-    private let localEngine: any TranslationEngine
-    private let llmRouter: LLMModelRouter
-    private var backend: TranslationBackend
+enum TranslationResultError: Error { case empty }
 
-    init(
-        localEngine: any TranslationEngine,
-        llmRouter: LLMModelRouter,
-        backend: TranslationBackend,
-        models: [LLMModelConfiguration],
-        timeoutSeconds: Double
-    ) {
-        self.localEngine = localEngine
-        self.llmRouter = llmRouter
-        self.backend = backend
-        Task {
-            await llmRouter.setModels(models)
-            await llmRouter.setFallbackTimeout(timeoutSeconds)
-        }
+/// Entire configurations are synchronously built and published in one actor
+/// turn. Requests retain their selected engine through the whole fallback.
+actor TranslationService: TranslationEngine {
+    typealias ModelFactory = @Sendable ([LLMModelConfiguration], Double) -> any TranslationEngine
+    private let engines: [TranslationBackend: any TranslationEngine]
+    private let modelFactory: ModelFactory
+    private var selected: any TranslationEngine
+    private var revision: UInt64 = 0
+
+    init(localEngine: any TranslationEngine, backend: TranslationBackend,
+        models: [LLMModelConfiguration], timeoutSeconds: Double,
+        engines injected: [TranslationBackend: any TranslationEngine] = [:],
+        modelFactory: @escaping ModelFactory = { LLMModelRouter(models: $0, timeoutSeconds: $1) }) {
+        var engines: [TranslationBackend: any TranslationEngine] = [
+            .local: localEngine, .google: GoogleTranslationEngine(), .bing: BingTranslationEngine(), .youdao: YoudaoTranslationEngine(),
+        ]
+        engines.merge(injected) { _, value in value }
+        self.engines = engines
+        self.modelFactory = modelFactory
+        selected = engines[backend] ?? modelFactory(models, timeoutSeconds)
     }
 
-    func configure(backend: TranslationBackend, models: [LLMModelConfiguration], timeoutSeconds: Double) async {
-        self.backend = backend
-        await llmRouter.setModels(models)
-        await llmRouter.setFallbackTimeout(timeoutSeconds)
+    func configure(backend: TranslationBackend, models: [LLMModelConfiguration], timeoutSeconds: Double,
+        revision requested: UInt64? = nil) {
+        let next = requested ?? (revision &+ 1)
+        guard next > revision else { return }
+        let engine = engines[backend] ?? modelFactory(models, timeoutSeconds)
+        selected = engine
+        revision = next
     }
 
     func translate(_ text: String, from: Language, to: Language) async throws -> String {
-        switch backend {
-        case .local:
-            return try await localEngine.translate(text, from: from, to: to)
-        case .languageModel:
-            return try await llmRouter.translate(text, from: from, to: to)
+        let engine = selected
+        return try await engine.translate(text, from: from, to: to)
+    }
+}
+
+/// Only controlled messages reach error UI, never arbitrary LLM/NSError
+/// descriptions that may echo input, endpoint secrets or model names.
+enum TranslationFailureMessage {
+    static func text(for error: any Error, backend: TranslationBackend, language: UILanguage) -> String {
+        let chinese = language == .chinese
+        if let error = error as? WebTranslationError {
+            if chinese { return error.errorDescription ?? "翻译失败，请重试。" }
+            let name = backend.displayName(for: .english)
+            switch error {
+            case .timeout: return "\(name): request timed out."
+            case .httpStatus(_, let code): return "\(name): HTTP \(code)."
+            case .upstream(_, let code): return "\(name): service error \(code)."
+            case .network: return "\(name): network connection failed."
+            case .emptyResult: return "\(name): no translation returned."
+            default: return "\(name): invalid service response."
+            }
         }
+        if let error = error as? LLMTranslationError {
+            switch error {
+            case .noEnabledModels: return chinese ? "未配置启用的语言模型。" : "No enabled language model configured."
+            case .invalidEndpoint: return chinese ? "语言模型地址无效。" : "Invalid language model endpoint."
+            case .timeout: return chinese ? "语言模型请求超时。" : "Language model request timed out."
+            case .httpStatus(_, let status, _): return chinese ? "语言模型返回 HTTP \(status)。" : "Language model: HTTP \(status)."
+            default: return chinese ? "语言模型翻译失败，请检查配置或稍后重试。" : "Language model translation failed. Check settings or retry."
+            }
+        }
+        if error is TranslationSessionError { return chinese ? "苹果本地翻译尚未就绪，请检查语言下载。" : "Apple translation is not ready. Check language downloads." }
+        return chinese ? "翻译失败，请检查网络或服务设置。" : "Translation failed. Check network or service settings."
     }
 }

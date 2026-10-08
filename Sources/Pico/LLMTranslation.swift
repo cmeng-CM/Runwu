@@ -357,6 +357,7 @@ public actor LLMModelRouter: TranslationEngine {
         if source == target { return input }
 
         let enabledModels = configurations.filter(\.enabled)
+        let requestDefaultTimeout = defaultTimeoutSeconds
         guard !enabledModels.isEmpty else { throw LLMTranslationError.noEnabledModels }
 
         var failures: [LLMModelFailure] = []
@@ -365,9 +366,9 @@ public actor LLMModelRouter: TranslationEngine {
             do {
                 let timeout = configuration.timeoutSeconds > 0
                     ? Self.clampTimeout(configuration.timeoutSeconds)
-                    : defaultTimeoutSeconds
+                    : requestDefaultTimeout
                 let result = try await withTimeout(timeout, modelName: configuration.name) {
-                    try await self.request(input, from: source, to: target, configuration: configuration)
+                    try await self.request(input, from: source, to: target, configuration: configuration, timeout: timeout)
                 }
                 try Task.checkCancellation()
                 return result
@@ -394,7 +395,8 @@ public actor LLMModelRouter: TranslationEngine {
         _ text: String,
         from source: Language,
         to target: Language,
-        configuration: LLMModelConfiguration
+        configuration: LLMModelConfiguration,
+        timeout: Double
     ) async throws -> String {
         let endpoint = try Self.endpointURL(for: configuration)
         var request = URLRequest(url: endpoint)
@@ -402,9 +404,7 @@ public actor LLMModelRouter: TranslationEngine {
         // URLSession's own timeout complements the task-group race below. It
         // ensures a stalled DNS/TLS/body task is cancelled even when a custom
         // URLProtocol or a proxy does not react immediately to cancellation.
-        request.timeoutInterval = configuration.timeoutSeconds > 0
-            ? Self.clampTimeout(configuration.timeoutSeconds)
-            : defaultTimeoutSeconds
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let apiKey = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)

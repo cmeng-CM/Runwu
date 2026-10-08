@@ -111,6 +111,7 @@ enum TranslationSpeed: Int, CaseIterable {
 enum TranslationBackend: String, CaseIterable, Codable, Identifiable, Sendable, Hashable {
     case local
     case languageModel = "language-model"
+    case google, bing, youdao
 
     var id: String { rawValue }
 
@@ -118,9 +119,19 @@ enum TranslationBackend: String, CaseIterable, Codable, Identifiable, Sendable, 
         switch self {
         case .local: return L10n.backendLocal(lang)
         case .languageModel: return L10n.backendLanguageModel(lang)
+        case .google: return "Google"
+        case .bing: return "Bing"
+        case .youdao: return lang == .chinese ? "有道" : "Youdao"
         }
     }
 }
+
+protocol ModelKeyStoring: Sendable {
+    func apiKey(forModelID id: UUID) throws -> String?
+    func setAPIKey(_ value: String?, forModelID id: UUID) throws
+    func deleteAPIKey(forModelID id: UUID) throws
+}
+extension KeychainStore: ModelKeyStoring {}
 
 enum TranslationTiming: String, CaseIterable, Sendable {
     case pause = "Pause"
@@ -297,6 +308,12 @@ struct ReplaceShortcut: Equatable, Sendable {
     @Published var overlaySurface: OverlaySurfaceEffect {
         didSet { defaults.set(overlaySurface.rawValue, forKey: "overlaySurface") }
     }
+    @Published var overlayFollowCaret: Bool {
+        didSet {
+            defaults.set(overlayFollowCaret, forKey: "overlayFollowCaret")
+            onOverlayFollowCaretChanged?()
+        }
+    }
     @Published var uiLanguage: UILanguage { didSet { defaults.set(uiLanguage.rawValue, forKey: "uiLanguage") } }
     @Published var sourceLanguage: Language {
         didSet {
@@ -428,6 +445,7 @@ struct ReplaceShortcut: Equatable, Sendable {
     }
     /// Assigned by AppState after its translation pipeline has been built.
     var onTranslationSettingsChanged: (() -> Void)?
+    var onOverlayFollowCaretChanged: (() -> Void)?
     var onAutoUpdateChanged: (() -> Void)?
     /// Fires when any clipboard-translation setting changes so AppState can
     /// re-sync the pasteboard watcher and hotkeys.
@@ -436,9 +454,11 @@ struct ReplaceShortcut: Equatable, Sendable {
     /// the selected retention period.
     var onHistoryRetentionChanged: (() -> Void)?
     private let defaults: UserDefaults
+    private let modelKeyStorage: any ModelKeyStoring
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, modelKeyStorage: any ModelKeyStoring = KeychainStore()) {
         self.defaults = defaults
+        self.modelKeyStorage = modelKeyStorage
         enabled = defaults.object(forKey: "enabled") as? Bool ?? true
         let storedHideAfter = defaults.object(forKey: "hideAfter") as? Double
         let hideAfterValue = min(max(storedHideAfter ?? 5, 5), 60)
@@ -461,6 +481,7 @@ struct ReplaceShortcut: Equatable, Sendable {
             min(max(defaults.object(forKey: "overlayOpacity") as? Double ?? 1, 0.3), 1)
         overlayTheme = OverlayTheme(rawValue: defaults.string(forKey: "overlayTheme") ?? "") ?? .system
         overlaySurface = OverlaySurfaceEffect(rawValue: defaults.string(forKey: "overlaySurface") ?? "") ?? .frost
+        overlayFollowCaret = defaults.object(forKey: "overlayFollowCaret") as? Bool ?? true
         uiLanguage =
             UILanguage(rawValue: defaults.string(forKey: "uiLanguage") ?? UILanguage.chinese.rawValue) ?? .chinese
         let storedSource = Self.readLanguage(defaults.string(forKey: "sourceLanguage"), fallback: .chinese)
@@ -555,7 +576,7 @@ struct ReplaceShortcut: Equatable, Sendable {
 
     func removeLLMModel(id: UUID) {
         llmModels.removeAll { $0.id == id }
-        try? KeychainStore().deleteAPIKey(forModelID: id)
+        try? modelKeyStorage.deleteAPIKey(forModelID: id)
     }
 
     func moveLLMModels(from offsets: IndexSet, to destination: Int) {
@@ -590,7 +611,7 @@ struct ReplaceShortcut: Equatable, Sendable {
 
     private func persistLLMModels() {
         var publicModels = llmModels
-        let keychain = KeychainStore()
+        let keychain = modelKeyStorage
         for index in publicModels.indices {
             let model = publicModels[index]
             if model.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -606,7 +627,7 @@ struct ReplaceShortcut: Equatable, Sendable {
     }
 
     private func restoreAPIKeysFromKeychain() {
-        let keychain = KeychainStore()
+        let keychain = modelKeyStorage
         for index in llmModels.indices {
             if let value = try? keychain.apiKey(forModelID: llmModels[index].id), !value.isEmpty {
                 llmModels[index].apiKey = value

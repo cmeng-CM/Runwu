@@ -29,6 +29,10 @@ struct MenuBarMenu: View {
         let lang = settings.uiLanguage
         Button(state.enabled ? L10n.pause(lang) : L10n.resume(lang)) { state.toggle() }
         Divider()
+        if let failure = state.realtimeFailure ?? state.clipboardFailure {
+            Text(failure)
+            Divider()
+        }
         Button(L10n.menuSettings(lang)) { state.presentSettings() }
         Button(L10n.quit(lang)) { NSApp.terminate(nil) }
     }
@@ -74,13 +78,16 @@ struct MenuBarMenu: View {
     private var menuBarWatchdog: Timer?
     private var menuBarHealAttempts = 0
     @Published var translation = ""
+    @Published private(set) var realtimeFailure: String?
+    @Published private(set) var clipboardFailure: String?
+    private let liveFailureNotice = TranslationFailureNotice()
+    private let clipboardFailureNotice = TranslationFailureNotice()
     @Published var permissionGranted: Bool
     @Published var showWelcome: Bool
     var settings: SettingsStore
     let permission = AccessibilityPermissionManager()
     let monitor = AccessibilityMonitor()
     let input = InputCoordinator()
-    let llmRouter: LLMModelRouter
     let translationService: TranslationService
     let coordinator: TranslationCoordinator
     let clipboardCoordinator: TranslationCoordinator
@@ -94,9 +101,12 @@ struct MenuBarMenu: View {
     private let hotKey = GlobalHotKey.shared
     private let realtime = RealtimeTranslationState()
     private var configurationGeneration: UInt64 = 0
+    private var configurationTask: Task<Void, Never>?
+    private let runtimeEnabled: Bool
     private var clipboardRequestID: UUID?
     private var pendingOrigin: OverlayOrigin?
     private var pendingAction: PendingTranslationAction?
+    var hasPendingTranslationAction: Bool { pendingAction != nil }
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var installHealWindow: NSWindow?
@@ -105,33 +115,35 @@ struct MenuBarMenu: View {
     private let permissionWatchdog = AccessibilityPermissionWatchdog()
     private var translationHostWindow: TranslationHostWindowController?
     init(settings store: SettingsStore = SettingsStore(), translationEngine: (any TranslationEngine)? = nil,
-        historyDatabaseURL: URL? = nil, startRuntime: Bool = true) {
+        historyDatabaseURL: URL? = nil, startRuntime: Bool = true,
+        engines: [TranslationBackend: any TranslationEngine] = [:],
+        modelFactory: @escaping TranslationService.ModelFactory = { LLMModelRouter(models: $0, timeoutSeconds: $1) },
+        speech suppliedSpeech: (any SpeechPerforming)? = nil) {
         let enabledValue = store.enabled
         let trustedValue = startRuntime && AXIsProcessTrusted()
         let welcomeValue = startRuntime && !UserDefaults.standard.bool(forKey: "onboardingComplete")
         let holder = TranslationSessionHolder()
-        let router = LLMModelRouter(models: store.llmModels, timeoutSeconds: store.llmFallbackTimeout)
+        holder.configure(source: store.sourceLanguage, target: store.targetLanguage)
         let service = TranslationService(
             localEngine: HostedTranslationEngine(holder: holder),
-            llmRouter: router,
             backend: store.translationBackend,
             models: store.llmModels,
-            timeoutSeconds: store.llmFallbackTimeout)
+            timeoutSeconds: store.llmFallbackTimeout, engines: engines, modelFactory: modelFactory)
         let historyController = TranslationHistoryController(databaseURL: historyDatabaseURL)
         settings = store
+        runtimeEnabled = startRuntime
         autoUpdater = AutoUpdateController(settings: store)
         enabled = enabledValue
         permissionGranted = trustedValue
         showWelcome = welcomeValue
         translationHolder = holder
-        llmRouter = router
         translationService = service
         coordinator = TranslationCoordinator(
             engine: translationEngine ?? service, sourceLanguage: store.sourceLanguage, targetLanguage: store.targetLanguage)
         clipboardCoordinator = TranslationCoordinator(
             engine: translationEngine ?? service, sourceLanguage: store.sourceLanguage, targetLanguage: store.targetLanguage)
         history = historyController
-        speech = SpeechService()
+        speech = suppliedSpeech ?? SpeechService()
         NSLog("Runwu startup trusted=%@ enabled=%@", String(trustedValue), String(enabledValue))
         DiagnosticLog.write("startup trusted=\(trustedValue) enabled=\(enabledValue)")
         logger.info("startup trusted=\(trustedValue, privacy: .public) enabled=\(enabledValue, privacy: .public)")
@@ -148,6 +160,7 @@ struct MenuBarMenu: View {
         overlay.cardOpacity = settings.overlayOpacity
         overlay.theme = settings.overlayTheme
         overlay.surface = settings.overlaySurface
+        overlay.followCaret = settings.overlayFollowCaret
         monitor.onSnapshot = { [weak self] snapshot, session, screen in
             self?.handleInputSnapshot(snapshot, session: session, screen: screen)
         }
@@ -163,6 +176,10 @@ struct MenuBarMenu: View {
         monitor.excludedBundleIDs = settings.excludedBundleIDs
         monitor.sourceLanguage = settings.sourceLanguage
         settings.onTranslationSettingsChanged = { [weak self] in self?.applyTranslationSettings() }
+        settings.onOverlayFollowCaretChanged = { [weak self] in
+            guard let self else { return }
+            self.overlay.followCaret = self.settings.overlayFollowCaret
+        }
         settings.onClipboardSettingsChanged = { [weak self] in self?.applyClipboardSettings() }
         settings.onAutoUpdateChanged = { [weak self] in self?.autoUpdater.startMonitoring() }
         overlay.onCopyToPasteboard = { [weak self] _ in self?.pasteboardWatcher.resyncBaseline() }
@@ -289,6 +306,8 @@ struct MenuBarMenu: View {
         let timeout = settings.llmFallbackTimeout
         let models = settings.llmModels
         configurationGeneration &+= 1
+        let revision = configurationGeneration
+        let previousConfiguration = configurationTask
         clipboardRequestID = nil
         invalidateRealtime(clearAnchor: true)
         input.setSourceLanguage(source)
@@ -297,37 +316,44 @@ struct MenuBarMenu: View {
         clearPendingAction()
         overlay.hideUnpinned()
         speech.stop()
+        clearFailure(realtime: true)
+        clearFailure(realtime: false)
         let coordinator = coordinator
         let clipboardCoordinator = clipboardCoordinator
         let service = translationService
-        Task {
-            await coordinator.cancel()
-            await clipboardCoordinator.cancel()
-            await coordinator.setDirection(from: source, to: target)
-            await clipboardCoordinator.setDirection(from: source, to: target)
-            await service.configure(backend: backend, models: models, timeoutSeconds: timeout)
-            await coordinator.clearCache()
-            await clipboardCoordinator.clearCache()
+        configurationTask = Task { [weak self] in
+            await previousConfiguration?.value
+            guard self?.configurationGeneration == revision else { return }
+            await coordinator.reconfigure(from: source, to: target, revision: revision)
+            await clipboardCoordinator.reconfigure(from: source, to: target, revision: revision)
+            guard self?.configurationGeneration == revision else { return }
+            await service.configure(backend: backend, models: models, timeoutSeconds: timeout, revision: revision)
         }
+    }
+    private func configurationReady(_ revision: UInt64) async -> Bool {
+        let barrier = configurationTask
+        await barrier?.value
+        return enabled && configurationGeneration == revision && !Task.isCancelled
     }
     func toggle() {
         enabled.toggle()
         settings.enabled = enabled
         input.isEnabled = enabled
+        // Pause and resume are request revisions too. Publish matching
+        // coordinator/service revisions through the same readiness barrier.
+        applyTranslationSettings()
         if enabled {
-            permissionGranted = AXIsProcessTrusted()
-            monitor.start()
-            refreshHotKeys()
-            maybePresentReauth()
+            if runtimeEnabled {
+                permissionGranted = AXIsProcessTrusted()
+                monitor.start()
+                refreshHotKeys()
+                maybePresentReauth()
+            }
         } else {
-            configurationGeneration &+= 1
-            clipboardRequestID = nil
-            invalidateRealtime(clearAnchor: true)
             input.reset()
             monitor.stop()
             clearPendingAction()
             refreshHotKeys()
-            Task { await coordinator.cancel(); await clipboardCoordinator.cancel() }
             speech.stop()
             overlay.hide()
         }
@@ -481,6 +507,7 @@ struct MenuBarMenu: View {
         clearRealtimePresentation()
     }
     private func clearRealtimePresentation() {
+        clearFailure(realtime: true)
         if case .realtime = pendingOrigin { clearPendingAction() }
         overlay.hideRealtime()
         speech.stop()
@@ -499,6 +526,8 @@ struct MenuBarMenu: View {
         let targetLanguage = settings.targetLanguage
         guard let request = realtime.beginRequest(text: text, key: sentenceKey, session: session) else { return }
         let configuration = configurationGeneration
+        let backend = settings.translationBackend
+        clearFailure(realtime: true)
         let previous = pendingAction
         let sameSentence = previous?.sentenceKey == sentenceKey && previous?.session == session
         let replacement = settings.replaceOriginal
@@ -516,15 +545,9 @@ struct MenuBarMenu: View {
         logger.info("translation requested length=\(text.count, privacy: .public)")
         let coordinator = coordinator
         Task { [weak self, coordinator] in
-            guard self?.realtime.accepts(request) == true, self?.configurationGeneration == configuration,
-                let result = await coordinator.translate(text, from: sourceLanguage, to: targetLanguage) else {
-                await MainActor.run {
-                    DiagnosticLog.write("translation returned no result")
-                    self?.logger.info("translation returned no result")
-                }
-                return
-            }
-            await MainActor.run {
+            guard await self?.configurationReady(configuration) == true, self?.realtime.accepts(request) == true else { return }
+            do {
+                let result = try await coordinator.translateThrowing(text, from: sourceLanguage, to: targetLanguage, revision: configuration)
                 self?.acceptTranslationResult(
                     result,
                     sourceText: text,
@@ -536,6 +559,14 @@ struct MenuBarMenu: View {
                     origin: .realtime(session),
                     configuration: configuration,
                     liveRequest: request)
+            } catch {
+                guard self?.realtime.accepts(request) == true,
+                    self?.configurationGeneration == configuration, self?.enabled == true else { return }
+                if error is CancellationError {
+                    self?.discardPending(key: sentenceKey, session: session)
+                    return
+                }
+                self?.presentFailure(error, backend: backend, origin: .realtime(session), key: sentenceKey, session: session)
             }
         }
     }
@@ -686,6 +717,7 @@ struct MenuBarMenu: View {
     }
 
     private func refreshHotKeys() {
+        guard runtimeEnabled else { return }
         hotKey.set(.replace, shortcut: enabled && settings.replaceOriginal ? settings.replaceShortcut : nil)
         hotKey.set(.copy, shortcut: enabled && settings.copyTranslation ? settings.copyShortcut : nil)
         hotKey.set(
@@ -699,6 +731,7 @@ struct MenuBarMenu: View {
     /// Keeps the pasteboard watcher and the clipboard hotkey in sync with the
     /// clipboard settings and the app's master switch.
     func applyClipboardSettings() {
+        guard runtimeEnabled else { return }
         let active = enabled && settings.clipboardTranslationEnabled
         if active && settings.clipboardTriggerMode == .autoWatch {
             pasteboardWatcher.start()
@@ -736,6 +769,8 @@ struct MenuBarMenu: View {
         let requestID = UUID()
         let sentenceKey = "clipboard:\(text)"
         let configuration = configurationGeneration
+        let backend = settings.translationBackend
+        clearFailure(realtime: false)
         let sourceLanguage = settings.sourceLanguage, targetLanguage = settings.targetLanguage
         clipboardRequestID = requestID
         pendingOrigin = .clipboard
@@ -745,13 +780,46 @@ struct MenuBarMenu: View {
         logger.info("clipboard translation requested length=\(text.count, privacy: .public)")
         let coordinator = clipboardCoordinator
         Task { [weak self, coordinator] in
-            guard self?.clipboardRequestID == requestID, self?.configurationGeneration == configuration,
-                let result = await coordinator.translate(text, from: sourceLanguage, to: targetLanguage) else { return }
-            self?.acceptTranslationResult(result, sourceText: text, sourceLanguage: sourceLanguage,
+            guard await self?.configurationReady(configuration) == true, self?.clipboardRequestID == requestID else { return }
+            do {
+                let result = try await coordinator.translateThrowing(text, from: sourceLanguage, to: targetLanguage, revision: configuration)
+                self?.acceptTranslationResult(result, sourceText: text, sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage, key: sentenceKey, session: session,
                 screen: NSScreen.main, origin: .clipboard, configuration: configuration,
                 clipboardRequest: requestID, speak: false)
+            } catch {
+                guard self?.clipboardRequestID == requestID,
+                    self?.configurationGeneration == configuration, self?.enabled == true else { return }
+                if error is CancellationError {
+                    self?.discardPending(key: sentenceKey, session: session)
+                    return
+                }
+                self?.presentFailure(error, backend: backend, origin: .clipboard, key: sentenceKey, session: session)
+            }
         }
+    }
+
+    private func clearFailure(realtime: Bool) {
+        if realtime { realtimeFailure = nil; liveFailureNotice.hide() }
+        else { clipboardFailure = nil; clipboardFailureNotice.hide() }
+    }
+    private func presentFailure(_ error: any Error, backend: TranslationBackend, origin: OverlayOrigin,
+        key: String, session: InputSessionID) {
+        discardPending(key: key, session: session)
+        let message = TranslationFailureMessage.text(for: error, backend: backend, language: settings.uiLanguage)
+        switch origin {
+        case .realtime:
+            overlay.hideRealtime()
+            realtimeFailure = message
+            liveFailureNotice.show(message, clipboard: false, language: settings.uiLanguage)
+        case .clipboard:
+            clipboardFailure = message
+            clipboardFailureNotice.show(message, clipboard: true, language: settings.uiLanguage)
+        case .fixed: break
+        }
+    }
+    private func discardPending(key: String, session: InputSessionID) {
+        if pendingAction?.session == session, pendingAction?.sentenceKey == key { clearPendingAction() }
     }
 
     private func handleTranslateHotKey() {
@@ -810,6 +878,43 @@ struct MenuBarMenu: View {
         // 授权观察器的 Task 持弱引用，应用退出时随 self 释放自行结束
         let watcher = pasteboardWatcher
         Task { @MainActor in watcher.stop() }
+    }
+}
+
+/// Failure UI is separate from translation cards: no copy/replace/speech
+/// controls, no source text, and no focus activation.
+@MainActor
+private final class TranslationFailureNotice {
+    private var panel: NSPanel?
+    private var dismissal: Task<Void, Never>?
+    func show(_ message: String, clipboard: Bool, language: UILanguage) {
+        hide()
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 70),
+            styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
+        let labelTitle = clipboard ? (language == .chinese ? "剪贴板翻译" : "Clipboard Translation")
+            : (language == .chinese ? "实时翻译" : "Realtime Translation")
+        panel.title = "润物 · " + labelTitle
+        panel.level = .floating
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.frame = NSRect(x: 16, y: 12, width: 328, height: 46)
+        label.isSelectable = false
+        panel.contentView?.addSubview(label)
+        if let screen = NSScreen.main {
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - 180, y: screen.visibleFrame.minY + (clipboard ? 160 : 48)))
+        }
+        self.panel = panel
+        panel.orderFrontRegardless()
+        dismissal = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            self?.hide()
+        }
+    }
+    func hide() {
+        dismissal?.cancel(); dismissal = nil
+        panel?.close(); panel = nil
     }
 }
 
