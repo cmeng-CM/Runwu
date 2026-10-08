@@ -42,7 +42,7 @@ final class OverlayCoordinatorRenderingTests: XCTestCase {
         let frames = coordinator.visiblePanelFrames
         XCTAssertEqual(frames.count, 1)
         let frame = frames[0]
-        let expected = min(460, max(240, screen.visibleFrame.height * 0.55))
+        let expected = min(460, max(240, screen.visibleFrame.height * 0.6))
         XCTAssertEqual(frame.height, expected, accuracy: 2)
         XCTAssertLessThanOrEqual(frame.width, 600)
         // The card must sit fully inside the visible screen.
@@ -57,7 +57,7 @@ final class OverlayCoordinatorRenderingTests: XCTestCase {
         let frames = coordinator.visiblePanelFrames
         XCTAssertEqual(frames.count, 1)
         let screen = try XCTUnwrap(NSScreen.main)
-        let expected = min(460, max(240, screen.visibleFrame.height * 0.55))
+        let expected = min(460, max(240, screen.visibleFrame.height * 0.6))
         XCTAssertEqual(frames[0].height, expected, accuracy: 2)
     }
 

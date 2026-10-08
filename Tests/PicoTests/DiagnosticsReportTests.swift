@@ -5,15 +5,15 @@ import XCTest
 final class DiagnosticsReportTests: XCTestCase {
     private func makeSnapshot() -> DiagnosticsSnapshot {
         DiagnosticsSnapshot(
-            appVersion: "1.0.8", appBuild: "9", bundleID: "com.asiyoua.pico",
-            installPath: "/Applications/Pico.app", installNeedsHealing: false,
+            appVersion: "1.0.8", appBuild: "9", bundleID: "com.cmeng.runwu",
+            installPath: "/Applications/Runwu.app", installNeedsHealing: false,
             osVersion: "14.6.1", hardwareModel: "Mac15,6", machine: "arm64",
             accessibilityTrusted: false, monitorRunning: false,
             probeLine: "probe target=com.tencent.xinWeChat result=no_text_element",
             weChatVersion: "4.1.5.16", enabled: true, timingRaw: "pause", speedMilliseconds: 450,
             sourceLanguage: "zh", targetLanguage: "en", backendRaw: "local", llmModelCount: 0,
             uiLanguage: "zh", clipboardEnabled: true, clipboardTriggerRaw: "auto-watch",
-            excludedBundleIDs: ["com.asiyoua.pico"], generatedAt: Date(timeIntervalSince1970: 1_789_000_000))
+            excludedBundleIDs: ["com.cmeng.runwu"], generatedAt: Date(timeIntervalSince1970: 1_789_000_000))
     }
 
     func testRenderContainsKeyDiagnosticLines() {
@@ -51,7 +51,7 @@ final class DiagnosticsReportTests: XCTestCase {
 
     func testFileNameFormatIsAttachmentFriendly() {
         XCTAssertTrue(
-            DiagnosticsReport.fileName(at: Date()).matches(pattern: #"^Pico-Diagnostics-\d{8}-\d{6}\.txt$"#))
+            DiagnosticsReport.fileName(at: Date()).matches(pattern: #"^Runwu-Diagnostics-\d{8}-\d{6}\.txt$"#))
     }
 
     func testRingBufferKeepsRecentLinesInOrderAndBounded() {

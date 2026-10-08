@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 安装位置自检：Pico 从磁盘映像、下载文件夹（或其触发的 App
+/// 安装位置自检：Runwu 从磁盘映像、下载文件夹（或其触发的 App
 /// Translocation 随机路径）运行时，Gatekeeper 每次启动都拦、辅助功能
 /// 授权反复失效。检测到就提示用户一键搬到「应用程序」，搬完重启新实例。
 enum InstallHealer {
@@ -39,7 +39,7 @@ enum InstallHealer {
             let dir = URL(fileURLWithPath: base, isDirectory: true)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             guard fm.isWritableFile(atPath: dir.path) else { continue }
-            let dest = dir.appendingPathComponent("Pico.app", isDirectory: true)
+            let dest = dir.appendingPathComponent("Runwu.app", isDirectory: true)
             if dest.path == appPath { return dest.path }
             if fm.fileExists(atPath: dest.path) {
                 try fm.removeItem(at: dest)
@@ -66,9 +66,9 @@ enum InstallHealer {
     static func spawnRelaunch(dest: String) {
         let script = """
         sleep 0.5
-        pkill -x Pico 2>/dev/null || true
+        pkill -x Runwu 2>/dev/null || true
         for i in 1 2 3 4 5 6 7 8 9 10; do
-            pgrep -x Pico >/dev/null 2>&1 || break
+            pgrep -x Runwu >/dev/null 2>&1 || break
             sleep 0.5
         done
         open "\(dest)"

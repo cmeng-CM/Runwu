@@ -607,7 +607,7 @@ struct SettingsView: View {
                 sidebarButton(page)
             }
             Spacer()
-            Text("Pico v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+            Text("Runwu v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 10)
@@ -701,9 +701,11 @@ struct SettingsView: View {
             SettingsGroup(title: L10n.autoUpdateGroupTitle(lang)) {
                 SettingsRow(label: L10n.autoUpdateToggle(lang)) {
                     smallToggle($state.settings.autoUpdateEnabled)
+                        .disabled(!AutoUpdateController.isSupported)
                 }
                 SettingsRow(label: L10n.autoInstallToggle(lang)) {
                     smallToggle($state.settings.autoInstallUpdates)
+                        .disabled(!AutoUpdateController.isSupported)
                 }
                 SettingsRow(label: L10n.autoUpdateStatus(lang), divider: false) {
                     Text(autoUpdateStatusText)
@@ -1255,7 +1257,7 @@ struct SettingsView: View {
 
     private func exportHistory(_ format: HistoryExportFormat) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Pico-history.\(format.fileExtension)"
+        panel.nameFieldStringValue = "Runwu-history.\(format.fileExtension)"
         panel.allowedContentTypes = [UTType(filenameExtension: format.fileExtension) ?? .data]
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }

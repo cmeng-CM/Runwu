@@ -435,9 +435,10 @@ struct ReplaceShortcut: Equatable, Sendable {
     /// Reloads and immediately prunes local history after the user shortens
     /// the selected retention period.
     var onHistoryRetentionChanged: (() -> Void)?
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         enabled = defaults.object(forKey: "enabled") as? Bool ?? true
         let storedHideAfter = defaults.object(forKey: "hideAfter") as? Double
         let hideAfterValue = min(max(storedHideAfter ?? 5, 5), 60)
@@ -499,7 +500,7 @@ struct ReplaceShortcut: Equatable, Sendable {
             defaults: defaults, keyCodeKey: "translateShortcutKeyCode", modifiersKey: "translateShortcutModifiers",
             fallback: .controlShiftT)
         clipboardTranslationEnabled = defaults.object(forKey: "clipboardTranslationEnabled") as? Bool ?? false
-        autoUpdateEnabled = defaults.object(forKey: "autoUpdateEnabled") as? Bool ?? true
+        autoUpdateEnabled = defaults.object(forKey: "autoUpdateEnabled") as? Bool ?? false
         autoInstallUpdates = defaults.object(forKey: "autoInstallUpdates") as? Bool ?? false
         if let skipped = defaults.string(forKey: "updateSkippedTag"), !skipped.isEmpty {
             updateSkippedTag = skipped
@@ -512,7 +513,7 @@ struct ReplaceShortcut: Equatable, Sendable {
         excludedBundleIDs = Set(
             defaults.stringArray(forKey: "excludedBundleIDs") ?? [
                 "com.agilebits.onepassword7", "com.apple.keychainaccess", "com.apple.dt.Xcode", "com.openai.codex",
-                "com.asiyoua.pico",
+                "com.asiyoua.pico", "com.cmeng.runwu",
             ])
         restoreAPIKeysFromKeychain()
         if defaults.object(forKey: "translationSpeed") == nil {

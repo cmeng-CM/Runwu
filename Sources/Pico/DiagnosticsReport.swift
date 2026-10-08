@@ -37,7 +37,7 @@ enum DiagnosticsReport {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return "Pico-Diagnostics-\(formatter.string(from: date)).txt"
+        return "Runwu-Diagnostics-\(formatter.string(from: date)).txt"
     }
 
     static func render(
@@ -46,9 +46,9 @@ enum DiagnosticsReport {
     ) -> String {
         let time = ISO8601DateFormatter().string(from: snapshot.generatedAt)
         var lines: [String] = [
-            "Pico 诊断报告 / Pico Diagnostics Report",
+            "Runwu 诊断报告 / Runwu Diagnostics Report",
             "generated_at: \(time)",
-            "说明：本文件由 Pico 在本机生成，未经过网络发送；不含翻译内容与 API 密钥。",
+            "说明：本文件由 Runwu 在本机生成，未经过网络发送；不含翻译内容与 API 密钥。",
             String(repeating: "=", count: 60),
             "[app]",
             "version: \(snapshot.appVersion) (build \(snapshot.appBuild))",
@@ -81,7 +81,7 @@ enum DiagnosticsReport {
         lines.append("[recent_log] (最近 \(recentLog.count) 条，仅含长度与标识)")
         lines.append(contentsOf: recentLog)
         lines.append(String(repeating: "=", count: 60))
-        lines.append("[debug_file] /tmp/pico-debug.log exists=\(debugLogExists)")
+        lines.append("[debug_file] /tmp/runwu-debug.log exists=\(debugLogExists)")
         if debugLogExists { lines.append(contentsOf: debugLogTail) }
         lines.append("")
         return lines.joined(separator: "\n")

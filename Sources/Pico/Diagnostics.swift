@@ -2,12 +2,12 @@ import Foundation
 
 /// Lightweight file log used while diagnosing Accessibility issues.
 ///
-/// Writing is opt-in: it is enabled by the `PICO_DEBUG=1` environment
+/// Writing is opt-in: it is enabled by the `RUNWU_DEBUG=1` environment
 /// variable or the `debugLogEnabled` user default. This keeps the release
 /// build from growing an unbounded log file for every poll tick. The file is
 /// truncated once it exceeds ``maxBytes`` so long sessions stay bounded.
 enum DiagnosticLog {
-    private static let url = URL(fileURLWithPath: "/tmp/pico-debug.log")
+    private static let url = URL(fileURLWithPath: "/tmp/runwu-debug.log")
     private static let maxBytes = 1_048_576
     /// 内存日志环：无论调试开关与否都记录，供「生成诊断报告」一键导出。
     /// 只待在本机内存里，用户主动导出报告时才随文件离开机器。
@@ -49,7 +49,7 @@ enum DiagnosticLog {
         return buffer
     }
 
-    /// 调试文件是否存在（存在说明用户开过 PICO_DEBUG/debugLogEnabled）。
+    /// 调试文件是否存在（存在说明用户开过 RUNWU_DEBUG/debugLogEnabled）。
     static func debugFileExists() -> Bool {
         FileManager.default.fileExists(atPath: url.path)
     }
@@ -72,7 +72,7 @@ enum DiagnosticLog {
     }
 
     private static func isEnabled() -> Bool {
-        ProcessInfo.processInfo.environment["PICO_DEBUG"] == "1"
+        ProcessInfo.processInfo.environment["RUNWU_DEBUG"] == "1"
             || UserDefaults.standard.bool(forKey: "debugLogEnabled")
     }
 

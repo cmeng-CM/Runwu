@@ -120,6 +120,9 @@ final class AutoUpdateController: ObservableObject {
 
     static let checkInterval: TimeInterval = 24 * 60 * 60
     static let downloadSizeCap = 64 * 1024 * 1024
+    /// Runwu local builds have no approved release/signing channel. Never
+    /// download or replace them from the inherited Pico release pipeline.
+    static let isSupported = false
 
     private let settings: SettingsStore
     private var timer: Timer?
@@ -135,7 +138,9 @@ final class AutoUpdateController: ObservableObject {
     func startMonitoring() {
         timer?.invalidate()
         timer = nil
-        guard settings.autoUpdateEnabled else {
+        scheduledCheck?.cancel()
+        scheduledCheck = nil
+        guard Self.isSupported, settings.autoUpdateEnabled else {
             phase = .idle
             return
         }
@@ -147,6 +152,7 @@ final class AutoUpdateController: ObservableObject {
 
     /// 关于页「检查更新」：手动触发，不受自动更新开关和「暂不更新」影响
     func checkManually() {
+        guard Self.isSupported else { return }
         guard !isBusy else { return }
         scheduleCheck(after: 0, manual: true)
     }
@@ -160,6 +166,9 @@ final class AutoUpdateController: ObservableObject {
 
     /// 设置页/关于页的状态行文案
     func statusText(for lang: UILanguage) -> String? {
+        guard Self.isSupported else {
+            return lang == .chinese ? "本地构建不提供自动更新" : "Updates are unavailable for local builds"
+        }
         switch phase {
         case .idle:
             return nil
@@ -190,6 +199,10 @@ final class AutoUpdateController: ObservableObject {
     }
 
     func runCheck(manual: Bool) async {
+        guard Self.isSupported else {
+            phase = .idle
+            return
+        }
         if !manual {
             guard settings.autoUpdateEnabled else {
                 phase = .idle
@@ -356,6 +369,10 @@ final class AutoUpdateController: ObservableObject {
     }
 
     private func startInstall() {
+        guard Self.isSupported else {
+            phase = .idle
+            return
+        }
         guard let release = pendingRelease else {
             phase = .failed(AutoUpdateError.noInstallerAsset.localizedDescription)
             return
@@ -432,8 +449,8 @@ final class AutoUpdateController: ObservableObject {
         }
         let version = UpdateChecker.stripLeadingV(tag)
         let asset = PicoReleaseInfo.Asset(
-            name: "Pico-\(version).dmg", size: 0,
-            browserDownloadURL: "https://github.com/asiyoua/pico/releases/download/\(tag)/Pico-\(version).dmg")
+            name: "Runwu-\(version).dmg", size: 0,
+            browserDownloadURL: "https://github.com/cmeng-CM/Runwu/releases/download/\(tag)/Runwu-\(version).dmg")
         return PicoReleaseInfo(tagName: tag, assets: [asset], body: nil)
     }
 
@@ -470,10 +487,10 @@ final class AutoUpdateController: ObservableObject {
 
     private func stageDownloadedUpdate(data: Data, version: String) throws -> URL {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("pico-update", isDirectory: true)
+            .appendingPathComponent("runwu-update", isDirectory: true)
         try? FileManager.default.removeItem(at: directory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("Pico-\(version).dmg")
+        let file = directory.appendingPathComponent("Runwu-\(version).dmg")
         try data.write(to: file, options: .atomic)
         return file
     }
@@ -484,20 +501,20 @@ final class AutoUpdateController: ObservableObject {
     /// 按应用当前真实位置换装（不强制 /Applications）；App Translocation
     /// 下原地不可写，回落到 /Applications。
     private func applyStagedUpdateAndRelaunch(dmgFile: URL) {
-        let mountPoint = "/tmp/pico-update-mount"
+        let mountPoint = "/tmp/runwu-update-mount"
         let bundlePath = Bundle.main.bundlePath
-        let target = bundlePath.contains("AppTranslocation") ? "/Applications/Pico.app" : bundlePath
+        let target = bundlePath.contains("AppTranslocation") ? "/Applications/Runwu.app" : bundlePath
         let parent = (target as NSString).deletingLastPathComponent
         let script = """
         set -e
         for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            pgrep -f "Pico.app/Contents/MacOS/Pico" >/dev/null 2>&1 || break
+            pgrep -f "Runwu.app/Contents/MacOS/Runwu" >/dev/null 2>&1 || break
             sleep 0.5
         done
         mkdir -p "\(mountPoint)"
         hdiutil attach "\(dmgFile.path)" -nobrowse -readonly -mountpoint "\(mountPoint)" >/dev/null
         rm -rf "\(target)"
-        cp -R "\(mountPoint)/Pico.app" "\(parent)/"
+        cp -R "\(mountPoint)/Runwu.app" "\(parent)/"
         hdiutil detach "\(mountPoint)" >/dev/null 2>&1 || true
         rm -f "\(dmgFile.path)"
         rmdir "\(mountPoint)" 2>/dev/null || true
@@ -525,7 +542,7 @@ final class UpdatePromptWindowDelegate: NSObject, NSWindowDelegate {
     }
 }
 
-/// 更新弹窗：图标 + 「Pico x.y.z 可更新」+ 当前版本 + 可滚动的发布说明框
+/// 更新弹窗：图标 + 「Runwu x.y.z 可更新」+ 当前版本 + 可滚动的发布说明框
 /// + 「自动安装」勾选 + 跳过/稍后/安装三键。窗口尺寸固定，见
 /// AutoUpdateController.promptWindowSize。
 private struct UpdatePromptView: View {

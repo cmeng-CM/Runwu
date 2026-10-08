@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Pico</string>
+	<string>Runwu</string>
 	<key>CFBundleExecutable</key>
-	<string>Pico</string>
+	<string>Runwu</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.asiyoua.pico</string>
+	<string>com.cmeng.runwu</string>
 	<key>CFBundleName</key>
-	<string>Pico</string>
+	<string>Runwu</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

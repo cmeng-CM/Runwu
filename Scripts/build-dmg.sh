@@ -10,22 +10,22 @@ fi
 
 zsh "$ROOT/Scripts/build-app.sh"
 
-APP="$ROOT/Pico.app"
+APP="$ROOT/Runwu.app"
 STAGE="$ROOT/dist/dmg-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/Pico.app"
+cp -R "$APP" "$STAGE/Runwu.app"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-DMG="$ROOT/dist/Pico-${VERSION}.dmg"
+DMG="$ROOT/dist/Runwu-${VERSION}.dmg"
 
 create-dmg \
-  --volname "Pico" \
+  --volname "Runwu" \
   --volicon "$APP/Contents/Resources/AppIcon.icns" \
   --window-size 600 400 \
   --icon-size 100 \
-  --icon "Pico.app" 150 200 \
-  --hide-extension "Pico.app" \
+  --icon "Runwu.app" 150 200 \
+  --hide-extension "Runwu.app" \
   --app-drop-link 450 200 \
   --overwrite \
   "$DMG" \

@@ -99,7 +99,7 @@ actor TranslationHistoryStore {
             appropriateFor: nil,
             create: true)
         return support
-            .appendingPathComponent("Pico", isDirectory: true)
+            .appendingPathComponent("Runwu", isDirectory: true)
             .appendingPathComponent("translation-history.sqlite", isDirectory: false)
     }
 

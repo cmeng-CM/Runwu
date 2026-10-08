@@ -50,7 +50,7 @@ final class UpdateCheckerTests: XCTestCase {
     }
 
     func testNewerPayloadReturnsReleaseURL() async {
-        let html = "https://github.com/asiyoua/pico/releases/tag/v0.2.0"
+        let html = "https://github.com/cmeng-CM/Runwu/releases/tag/v0.2.0"
         let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
             githubOK(tag: "v0.2.0", html: html)
         }
@@ -62,7 +62,7 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testSameVersionIsUpToDateAndDoesNotOpen() async {
         let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
-            githubOK(tag: "v0.1.0", html: "https://github.com/asiyoua/pico/releases/tag/v0.1.0")
+            githubOK(tag: "v0.1.0", html: "https://github.com/cmeng-CM/Runwu/releases/tag/v0.1.0")
         }
         let result = await checker.check()
         XCTAssertEqual(result, .upToDate)
@@ -72,7 +72,7 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testLowerRemoteIsUpToDate() async {
         let checker = UpdateChecker(currentVersion: "0.2.0") { _ in
-            githubOK(tag: "0.1.9", html: "https://github.com/asiyoua/pico/releases/tag/v0.1.9")
+            githubOK(tag: "0.1.9", html: "https://github.com/cmeng-CM/Runwu/releases/tag/v0.1.9")
         }
         let result = await checker.check()
         XCTAssertEqual(result, .upToDate)
@@ -109,7 +109,7 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testNonNumericTagIsFailed() async {
         let checker = UpdateChecker(currentVersion: "0.1.0") { _ in
-            githubOK(tag: "nightly", html: "https://github.com/asiyoua/pico/releases/tag/nightly")
+            githubOK(tag: "nightly", html: "https://github.com/cmeng-CM/Runwu/releases/tag/nightly")
         }
         let result = await checker.check()
         XCTAssertEqual(result, .failed)
@@ -130,32 +130,32 @@ final class UpdateCheckerTests: XCTestCase {
             if request.url == UpdateChecker.latestReleaseURL {
                 return githubHTTP(403, body: "{\"message\":\"rate limit\"}")
             }
-            return pageResponse(finalURL: URL(string: "https://github.com/asiyoua/pico/releases/tag/v0.2.0")!)
+            return pageResponse(finalURL: URL(string: "https://github.com/cmeng-CM/Runwu/releases/tag/v0.2.0")!)
         }
         let result = await checker.check()
         XCTAssertEqual(
             result,
-            .newer(URL(string: "https://github.com/asiyoua/pico/releases/tag/v0.2.0")!))
+            .newer(URL(string: "https://github.com/cmeng-CM/Runwu/releases/tag/v0.2.0")!))
     }
 
     // MARK: Trusted update hosts (download URLs come from release metadata)
 
     func testSafeUpdateURLAcceptsGitHubHosts() {
         XCTAssertEqual(
-            UpdateChecker.safeUpdateURL("https://github.com/asiyoua/pico/releases/download/v1.0.3/Pico-1.0.3.dmg")?
+            UpdateChecker.safeUpdateURL("https://github.com/cmeng-CM/Runwu/releases/download/v1.0.3/Runwu-1.0.3.dmg")?
                 .host, "github.com")
         XCTAssertEqual(
-            UpdateChecker.safeUpdateURL("https://objects.githubusercontent.com/x/Pico-1.0.3.dmg")?.host,
+            UpdateChecker.safeUpdateURL("https://objects.githubusercontent.com/x/Runwu-1.0.3.dmg")?.host,
             "objects.githubusercontent.com")
         XCTAssertEqual(
             UpdateChecker.safeUpdateURL("https://release-assets.githubusercontent.com/x")?.host,
             "release-assets.githubusercontent.com")
-        XCTAssertEqual(UpdateChecker.safeUpdateURL("https://api.github.com/repos/asiyoua/pico/releases/latest")?
+        XCTAssertEqual(UpdateChecker.safeUpdateURL("https://api.github.com/repos/cmeng-CM/Runwu/releases/latest")?
             .host, "api.github.com")
     }
 
     func testSafeUpdateURLRejectsNonGitHubAndInsecureTargets() {
-        XCTAssertNil(UpdateChecker.safeUpdateURL("http://github.com/asiyoua/pico/releases/download/v1/Pico.dmg"))
+        XCTAssertNil(UpdateChecker.safeUpdateURL("http://github.com/cmeng-CM/Runwu/releases/download/v1/Pico.dmg"))
         XCTAssertNil(UpdateChecker.safeUpdateURL("https://evil.example.com/Pico.dmg"))
         XCTAssertNil(UpdateChecker.safeUpdateURL("https://127.0.0.1/Pico.dmg"))
         XCTAssertNil(UpdateChecker.safeUpdateURL("https://192.168.1.10/Pico.dmg"))
@@ -176,7 +176,7 @@ final class UpdateCheckerTests: XCTestCase {
             if request.url == UpdateChecker.latestReleaseURL {
                 return githubHTTP(403, body: "{}")
             }
-            return pageResponse(finalURL: URL(string: "https://github.com/asiyoua/pico/releases/tag/v0.1.0")!)
+            return pageResponse(finalURL: URL(string: "https://github.com/cmeng-CM/Runwu/releases/tag/v0.1.0")!)
         }
         let result = await checker.check()
         XCTAssertEqual(result, .upToDate)
@@ -187,7 +187,7 @@ final class UpdateCheckerTests: XCTestCase {
             if request.url == UpdateChecker.latestReleaseURL {
                 return githubHTTP(403, body: "{}")
             }
-            return pageResponse(finalURL: URL(string: "https://github.com/asiyoua/pico/releases/latest")!)
+            return pageResponse(finalURL: URL(string: "https://github.com/cmeng-CM/Runwu/releases/latest")!)
         }
         let result = await checker.check()
         XCTAssertEqual(result, .failed)
@@ -195,10 +195,10 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testTagFromFinalURL() {
         XCTAssertEqual(
-            UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/asiyoua/pico/releases/tag/v1.2.3")),
+            UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/cmeng-CM/Runwu/releases/tag/v1.2.3")),
             "v1.2.3")
-        XCTAssertNil(UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/asiyoua/pico/releases/latest")))
-        XCTAssertNil(UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/asiyoua/pico/releases/tag/nightly")))
+        XCTAssertNil(UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/cmeng-CM/Runwu/releases/latest")))
+        XCTAssertNil(UpdateChecker.tagFromFinalURL(URL(string: "https://github.com/cmeng-CM/Runwu/releases/tag/nightly")))
         XCTAssertNil(UpdateChecker.tagFromFinalURL(nil))
     }
 }

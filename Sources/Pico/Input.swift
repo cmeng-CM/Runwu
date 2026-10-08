@@ -30,7 +30,7 @@ public struct InputSessionID: Hashable, Sendable {
 }
 
 @MainActor final class InputCoordinator {
-    private let logger = Logger(subsystem: "app.pico", category: "pipeline")
+    private let logger = Logger(subsystem: "com.cmeng.runwu", category: "pipeline")
     private let extractor = SentenceExtractor(), detector = LanguageTextDetector(), debouncer = InputDebouncer()
     private var lastSentence = "", session: InputSessionID?
     var isEnabled = true
@@ -124,7 +124,7 @@ public struct InputSessionID: Hashable, Sendable {
 }
 
 @MainActor final class AccessibilityMonitor {
-    private let logger = Logger(subsystem: "app.pico", category: "accessibility")
+    private let logger = Logger(subsystem: "com.cmeng.runwu", category: "accessibility")
     var onSnapshot: ((TextSnapshot, InputSessionID, NSScreen?) -> Void)?
     var excludedBundleIDs: Set<String> = []
     var sourceLanguage: Language = .chinese
@@ -137,20 +137,20 @@ public struct InputSessionID: Hashable, Sendable {
     /// keystroke, which is noticeable against slow accessibility apps.
     private var focusedFieldFrame: NSRect?
     private(set) var isRunning = false
-    /// 最近一次前台的非 Pico 应用，是诊断探针的目标（设置窗打开时 Pico 自己才是前台应用）。
+    /// 最近一次前台的非 Runwu 应用，是诊断探针的目标（设置窗打开时 Runwu 自己才是前台应用）。
     private(set) var lastExternalApp: (pid: pid_t, bundleID: String)?
     private var lastResolvedProbe = Date.distantPast
     func start() {
         guard AXIsProcessTrusted() else {
             DiagnosticLog.write("AX trust check failed")
-            NSLog("Pico AX trust check failed")
+            NSLog("Runwu AX trust check failed")
             logger.error("AX trust check failed")
             return
         }
         guard !isRunning else { return }
         isRunning = true
         DiagnosticLog.write("monitor starting")
-        NSLog("Pico monitor starting")
+        NSLog("Runwu monitor starting")
         logger.info("monitor starting")
         appObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -301,7 +301,7 @@ public struct InputSessionID: Hashable, Sendable {
         guard !resolved.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return (resolved, captured?.session ?? session, captured?.screen ?? NSScreen.main)
     }
-    /// 诊断探针：检查最近前台的非 Pico 应用现在能否读到文本元素。只报结论
+    /// 诊断探针：检查最近前台的非 Runwu 应用现在能否读到文本元素。只报结论
     /// 与角色名，绝不带走文本内容。这是「打字翻译没反应」类问题的第一线索：
     /// 授权掉了什么都没得读；微信 4.1.5+/自绘应用则读不到文本元素。
     func diagnosticProbe() -> String {

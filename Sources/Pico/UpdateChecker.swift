@@ -43,11 +43,11 @@ struct GitHubLatestRelease: Decodable, Sendable {
 }
 
 struct UpdateChecker: Sendable {
-    static let latestReleaseURL = URL(string: "https://api.github.com/repos/asiyoua/pico/releases/latest")!
+    static let latestReleaseURL = URL(string: "https://api.github.com/repos/cmeng-CM/Runwu/releases/latest")!
     // GitHub API 匿名限流按出口 IP 共享，挂代理时经常 403；releases/latest
     // 页面 302 到 /releases/tag/<tag>，网页域名不吃 API 限流，作为回退。
-    static let latestReleasePageURL = URL(string: "https://github.com/asiyoua/pico/releases/latest")!
-    static let userAgent = "Pico (https://github.com/asiyoua/pico)"
+    static let latestReleasePageURL = URL(string: "https://github.com/cmeng-CM/Runwu/releases/latest")!
+    static let userAgent = "Runwu (https://github.com/cmeng-CM/Runwu)"
 
     var currentVersion: String
     var fetch: @Sendable (URLRequest) async throws -> (Data, URLResponse)
@@ -116,7 +116,7 @@ struct UpdateChecker: Sendable {
         else { return .failed }
         return Self.result(
             local: local, remoteTag: tag,
-            newerURL: URL(string: "https://github.com/asiyoua/pico/releases/tag/\(tag)"))
+            newerURL: URL(string: "https://github.com/cmeng-CM/Runwu/releases/tag/\(tag)"))
     }
 
     /// 从跟随重定向后的最终 URL 提取 tag，如 …/releases/tag/v1.0.1 → v1.0.1

@@ -7,11 +7,11 @@ import SwiftUI
 @main struct PicoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     var body: some Scene {
-        MenuBarExtra("Pico", image: "MenuBarIcon") {
+        MenuBarExtra("Runwu", image: "MenuBarIcon") {
             MenuBarMenu(state: appDelegate.state)
         }.menuBarExtraStyle(.menu)
         Settings { SettingsView(state: appDelegate.state) }
-        Window("Welcome to Pico", id: "welcome") { WelcomeView(state: appDelegate.state) }.defaultSize(
+        Window("Welcome to Runwu", id: "welcome") { WelcomeView(state: appDelegate.state) }.defaultSize(
             width: 520, height: 360)
     }
 }
@@ -69,7 +69,7 @@ struct MenuBarMenu: View {
 }
 
 @MainActor final class AppState: ObservableObject {
-    private let logger = Logger(subsystem: "app.pico", category: "runtime")
+    private let logger = Logger(subsystem: "com.cmeng.runwu", category: "runtime")
     @Published var enabled: Bool
     private var menuBarWatchdog: Timer?
     private var menuBarHealAttempts = 0
@@ -126,7 +126,7 @@ struct MenuBarMenu: View {
             engine: service, sourceLanguage: store.sourceLanguage, targetLanguage: store.targetLanguage)
         history = historyController
         speech = SpeechService()
-        NSLog("Pico startup trusted=%@ enabled=%@", String(trustedValue), String(enabledValue))
+        NSLog("Runwu startup trusted=%@ enabled=%@", String(trustedValue), String(enabledValue))
         DiagnosticLog.write("startup trusted=\(trustedValue) enabled=\(enabledValue)")
         logger.info("startup trusted=\(trustedValue, privacy: .public) enabled=\(enabledValue, privacy: .public)")
         input.isEnabled = enabled
@@ -408,7 +408,7 @@ struct MenuBarMenu: View {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 360), styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        window.title = "Welcome to Pico"
+        window.title = "Welcome to Runwu"
         window.contentView = NSHostingView(rootView: WelcomeView(state: self))
         centerOnMainScreen(window)
         window.isReleasedWhenClosed = false
@@ -588,7 +588,7 @@ struct MenuBarMenu: View {
         window.orderFrontRegardless()
         reauthWindow = window
         DiagnosticLog.write("reauth prompt presented")
-        NSLog("Pico reauth prompt presented")
+        NSLog("Runwu reauth prompt presented")
     }
 
     func setReplaceOriginal(_ enabled: Bool) {
@@ -773,7 +773,7 @@ struct AboutView: View {
             Button(L10n.checkForUpdates(language)) {
                 autoUpdater.checkManually()
             }
-            .disabled(autoUpdater.isBusy)
+            .disabled(!AutoUpdateController.isSupported || autoUpdater.isBusy)
             if let statusText = autoUpdater.statusText(for: language) {
                 Text(statusText).font(.caption).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -781,8 +781,8 @@ struct AboutView: View {
             Divider()
             aboutLinkRow(
                 label: L10n.aboutProjectRepo(language),
-                title: "github.com/asiyoua/pico",
-                urlString: "https://github.com/asiyoua/pico")
+                title: "github.com/cmeng-CM/Runwu",
+                urlString: "https://github.com/cmeng-CM/Runwu")
             aboutLinkRow(
                 label: L10n.aboutContactAuthor(language),
                 title: "xinzhu400@gmail.com",
@@ -835,9 +835,9 @@ struct WelcomeView: View {
             ).font(.title).multilineTextAlignment(.center)
             Text(
                 step == 0
-                        ? "Pico translates what you're typing without interrupting your workflow."
+                        ? "Runwu translates what you're typing without interrupting your workflow."
                         : step == 1
-                            ? "Permission lets Pico read only the editable text field. Password fields are always skipped."
+                            ? "Permission lets Runwu read only the editable text field. Password fields are always skipped."
                             : "Type something in Chinese in any supported text field."
             ).multilineTextAlignment(.center).foregroundStyle(.secondary)
             if step == 1 && !state.permissionGranted {
