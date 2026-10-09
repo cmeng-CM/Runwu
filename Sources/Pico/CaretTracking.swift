@@ -230,10 +230,12 @@ struct AXFieldReader {
             guard safe(candidate, pid: pid) else { return nil }
             let focus = optionalBoolean(candidate, kAXFocusedAttribute as String)
             guard focus.valid else { return nil }
-            guard focus.value != false else { return nil }
+            // Only the authoritative root's explicit denial vetoes its tree.
+            // A safe layout wrapper need not itself hold keyboard focus.
+            if isRoot, !requiresExplicitFocus, focus.value == false { return nil }
             let editing = editingQualification(candidate)
             guard editing != .rejected else { return nil }
-            let hasFocus = (!requiresExplicitFocus && isRoot) || focus.value == true
+            let hasFocus = focus.value != false && ((!requiresExplicitFocus && isRoot) || focus.value == true)
             if hasFocus, editing == .editor { return candidate }
             guard depth > 0,
                 let children = access.attribute(candidate, kAXChildrenAttribute as String) as? [AXUIElement] else { return nil }

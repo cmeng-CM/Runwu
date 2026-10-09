@@ -44,6 +44,52 @@ import XCTest
         XCTAssertEqual(sample.snapshot.text, "真正输入。")
         XCTAssertEqual(fixture.contentReads, [fixture.second])
     }
+    func testUnfocusedSafeWrappersReachOnlyFocusedEditableDescendant() throws {
+        let (fixture, _, _) = wrappedFixture()
+        let monitor = fixture.monitor()
+        let sample = try XCTUnwrap(monitor.snapshotNow())
+        XCTAssertEqual(sample.snapshot.text, "真正输入。")
+        XCTAssertEqual(fixture.contentReads, [fixture.first])
+        XCTAssertTrue(monitor.replace(sourceWithTerminator: "真正输入。", translation: "Actual input.",
+            expectedSession: sample.session))
+        XCTAssertEqual(fixture.writes, ["AXValue", "AXSelectedTextRange"])
+    }
+
+    func testUnfocusedWrapperTraversalKeepsRootEditorAndSafetyVetoes() {
+        for mode in 0..<10 {
+            let (fixture, wrapper, _) = wrappedFixture()
+            switch mode {
+            case 0: fixture.nodes[fixture.container]?.focused = false
+            case 1: fixture.nodes[fixture.first]?.focused = false
+            case 2: fixture.nodes[wrapper]?.editable = false
+            case 3: fixture.nodes[wrapper]?.enabled = false
+            case 4: fixture.nodes[wrapper]?.protected = true
+            case 5: fixture.nodes[wrapper]?.role = "AXSecureTextField"
+            case 6: fixture.nodes[wrapper]?.pid = 999
+            case 7: fixture.nodes[wrapper]?.attributeResults["AXFocused"] = .unavailable(.cannotComplete)
+            case 8: fixture.nodes[wrapper]?.attributeResults["AXEditable"] = .value("invalid" as CFString)
+            default: fixture.nodes[wrapper]?.attributeResults["AXEnabled"] = .budgetExhausted
+            }
+            let monitor = fixture.monitor()
+            XCTAssertNil(monitor.snapshotNow(), "wrapper veto mode \(mode)")
+            XCTAssertFalse(monitor.replace(sourceWithTerminator: "真正输入。", translation: "Input."))
+            XCTAssertTrue(fixture.contentReads.isEmpty)
+            XCTAssertTrue(fixture.writes.isEmpty)
+        }
+    }
+
+    private func wrappedFixture() -> (EditableFixture, AXUIElement, AXUIElement) {
+        let fixture = EditableFixture()
+        let outer = AXUIElementCreateApplication(944), inner = AXUIElementCreateApplication(945)
+        fixture.focus = fixture.container
+        fixture.nodes[fixture.container] = .init(role: "AXGroup", children: [outer])
+        fixture.nodes[outer] = .init(role: "AXGroup", focused: false, children: [inner])
+        fixture.nodes[inner] = .init(role: "AXGroup", focused: false, children: [fixture.second, fixture.first])
+        fixture.nodes[fixture.second] = .init(role: "AXTextField", focused: false, editable: true, text: "不应读取。")
+        fixture.nodes[fixture.first] = .init(role: "AXTextField", focused: true, editable: true, text: "真正输入。")
+        return (fixture, outer, inner)
+    }
+
     func testNativeSearchRenameOptionalMetadataAndWebEditorsRemainUsableWithoutCaret() throws {
         for role in ["AXTextField", "AXTextArea", "AXComboBox", "AXGroup"] {
             let fixture = EditableFixture()
@@ -246,6 +292,9 @@ import XCTest
         var text: String = "合成输入。"
         var selected: Bool = false
         var children: [AXUIElement] = []
+        var protected = false
+        var pid: pid_t = 940
+        var attributeResults: [String: AXAttributeResult] = [:]
     }
     let pid: pid_t = 940
     let first = AXUIElementCreateApplication(941), second = AXUIElementCreateApplication(942)
@@ -274,11 +323,12 @@ import XCTest
             if let error = errors[key] { return .unavailable(error) }
             if key == "AXFocusedUIElement" { return focus.map(AXAttributeResult.value) ?? .unavailable(.noValue) }
             guard let node = nodes[element] else { return .unavailable(.invalidUIElement) }
+            if let result = node.attributeResults[key] { return result }
             var value: CFTypeRef?
             switch key {
             case "AXRole": value = node.role as CFString
             case "AXSubrole": value = "" as CFString
-            case "AXProtectedContent": value = kCFBooleanFalse
+            case "AXProtectedContent": value = node.protected ? kCFBooleanTrue : kCFBooleanFalse
             case "AXFocused": value = node.focused.map { $0 ? kCFBooleanTrue! : kCFBooleanFalse! }
             case "AXEditable": value = node.editable.map { $0 ? kCFBooleanTrue! : kCFBooleanFalse! }
             case "AXEnabled": value = node.enabled.map { $0 ? kCFBooleanTrue! : kCFBooleanFalse! }
@@ -295,7 +345,7 @@ import XCTest
             default: break
             }
             return value.map(AXAttributeResult.value) ?? .unavailable(.attributeUnsupported)
-        }, parameterized: { _, _, _ in nil }, pid: { _ in 940 },
+        }, parameterized: { _, _, _ in nil }, pid: { [self] in nodes[$0]?.pid ?? 940 },
             secureInputActive: { false }, enableAccessibility: { _ in }, hitTest: { _ in nil },
             writeAttribute: { [self] element, key, value in
                 writes.append(key)
