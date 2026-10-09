@@ -11,7 +11,7 @@ This project uses Tabler’s MIT-licensed SVG artwork only. It is **not** an off
 
 ## 润物应用图标 v2
 
-用户于 **2026-10-09** 明确批准第二版「夜雨双语」图标。项目应用图标采用此批准原图，菜单栏和历史图标继续使用上面的既有资源。
+用户于 **2026-10-09** 明确批准第二版「夜雨双语」图标。项目应用图标采用此批准原图；菜单栏图标改为下述风卷雨滴单色派生，历史图标继续使用上面的 Tabler Clock 资源。
 
 - 工具：内置 `image_gen.imagegen`，`transparent_background=true`。
 - 最终生成结果：`/Users/cm/.codex/generated_images/01a11a59-f4dd-7ab3-b4bd-29d05ca5756b/exec-43f21416-747c-40a8-b529-4931dce13d67.png`。
@@ -37,3 +37,19 @@ Refine this single macOS icon while preserving its core composition: midnight na
 The main correction is the typing caret: REMOVE the large luminous vertical stroke to the right of A completely. It currently makes the logo read “AI”, which is wrong. There must be exactly the two readable glyphs “文” and “A”, no I or other letters. Instead use a single small, crisp, vertical typing cursor to the LEFT of 文, about one-third of the glyph height, slightly offset toward the lower baseline and with ample spacing. This short accent should be clearly a tiny input cursor, not another letter and not a glowing decoration. Balance the two glyphs centrally in the broad drop; preserve readability.
 Also simplify excessive material shading: reduce glow, glassiness and the embossed border on the navy tile. Aim for restrained satin, clear broad shapes and crisp contours that stay recognizable at 32–64 pixels. Retain subtle depth but avoid watery textures and excessive highlights. Preserve the flowing spring-rain silhouette and quiet night mood; the goal is a polished minimalist real-time Chinese-English translator logo, not a weather icon or generic AI brand. No additional symbols, captions, stars, poem text or mockup framing.
 ```
+
+
+## 润物菜单栏图标
+
+菜单栏的 `MenuBarIcon` 是批准主图 v2 的独立单色品牌适配：保留风卷雨滴外轮廓及内部流动负空间，使用可编辑的 AppKit `NSBezierPath` 贝塞尔曲线和 even-odd 镂空。它不是 Tabler Brand Tailwind 或历史 Clock 的派生，也不再使用旧闪电路径。
+
+菜单栏空间有限，保留品牌轮廓和风流关系，省略主图的「文 A」、输入光标、深蓝底色、渐变与材质。输出只有黑色及 alpha，留光学边距；模板在原生浅/深外观下由系统着色。这是小尺寸单色适配，不修改已批准主 PNG 或 classic AppIcon.icns。
+
+```sh
+swift Scripts/make-menubar-icon.swift
+zsh Scripts/build-app.sh
+```
+
+生成器通过脚本路径定位仓库，不依赖当前工作目录。显式 bitmap 生成 `MenuBarIcon-16.png`、`MenuBarIcon-32.png`、`MenuBarIcon-48.png`，实际分别为 16/32/48 像素；`Contents.json` 对应 1x/2x/3x，统一 **16 × 16 逻辑点**，保留 `template-rendering-intent=template`，旧 64 像素派生删除。当前 macOS 构建实际消费 1x/2x，3x 保留为规范源资源，不声称它进入 macOS Assets.car。每档直接绘制同一可编辑路径，不经过 imagegen、不在小图填入文字。
+
+构建仍编译 `Assets.car`，现有 `MenuBarExtra("润物", image: "MenuBarIcon")` 通过原资源名消费；主应用图标、历史图标和功能代码不受此次资源改动影响。
