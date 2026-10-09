@@ -2,7 +2,7 @@
 
 | 元信息 | 内容 |
 | --- | --- |
-| 状态 / 更新 | 草稿 / 2026-10-09 |
+| 状态 / 更新 | 实现 / 2026-10-09 |
 | 分级 / 生命周期 | 标准档，spec-anchored，供实现、审查与后续维护 |
 | 讨论入口 | 用户确认 A：全局切换，并立即重新翻译当前卡片 |
 | 关联来源 | [既有跟随与服务设计](caret-translation.md)，承接配置代次、原文保护及浮窗生命周期 |
@@ -71,17 +71,20 @@ UI 可采用系统下拉控件或 SwiftUI Menu，但必须穿透全卡透明拖�
 
 ## 接口与数据形状
 
-预期形状如下；实际符号名称在交付时按源码回写。
+实际接口保持现有翻译协议及设置键；新增状态仅在内存中。
 
 | 接口 | 契约 |
 | --- | --- |
-| Overlay 卡片翻译上下文 | 原文、source/target Language、结果 backend；仅内存，不含密钥/模型配置 |
-| 接受正常结果 | App 捕获请求 backend，与原文及语言方向一起传入实时/剪贴板卡 |
-| 服务选择回调 | Entry UUID + TranslationBackend；校验存活且有原文，再进入 App 全局设置路径 |
-| 显式苹果方向宿主 | 当前全局方向相同可复用既有服务；不同方向建立临时 holder/host，以卡片方向创建 HostedTranslationEngine，不改变全局语言配置，完成或失效释放 |
-| 显式卡片请求身份 | Entry UUID、独立请求序号/UUID、configurationGeneration；使用配置屏障和不可变服务快照 |
-| Overlay 更新接口 | 按 UUID 更新现有卡，不使用 show 新建代替；保留其 pin/位置/anchor，支持 loading 与恢复自动隐藏 |
-| 预览卡 | 无真实原文/译文归属，显示预览标识，不伪造苹果服务或发起重译 |
+| `OverlayTranslationContext` | `sourceText`、`sourceLanguage`、`targetLanguage`、`backend`，由接受结果的请求快照构造；剪贴板原文保存在上下文中，延续原卡只显示译文的正文布局 |
+| `AppState.acceptTranslationResult` | 实时/剪贴板通过原有请求与配置校验后附带上下文，服务不会从返回时全局设置重新读取 |
+| `OverlayCoordinator.onServiceSelected` → `AppState.selectOverlayService(_:backend:)` | UUID + backend；校验启用且卡片有上下文，持久化全局 backend，目标 UUID 通过 `preservedServiceCard` 穿过设置和输入 reset 清理，再等待 `configurationReady` |
+| `AppState.CardRequest` / `cardRequests` | 卡片 UUID 索引，保存独立请求 UUID、配置代次、Task、独立 coordinator、可选 holder/host；每次创建 `TranslationService` 捕获所选服务、模型链、timeout 与初始化注入的 engines/modelFactory，不复用其他卡缓存 |
+| `acceptsCardRequest` / `cancelCardRequest` | 配置代次、请求 UUID、存活卡和 enabled 联合校验；取消外层 Task 及 coordinator 的底层 engine task，关闭临时 host；迟到回复不得重建卡 |
+| `beginRetranslation` / `finishRetranslation` | 原 UUID 更新 loading、受控失败或合法结果；旧译文仍标旧服务；成功更新上下文并记录历史，不走 pending copy/replace/speech 路径 |
+| `OverlayServicePopUpButton` / `OverlayServiceNativeMenu` | 真正原生下拉；不成为 first responder、不要求 panel 成为 key；拖拽层按真实 control bounds 穿透。菜单保留 delegate，保证 action 重建 hosting view 后 `menuDidClose` 仍平衡计时 |
+| `setMenuOpen` / `pendingBackend` | 展开及重译暂停自动隐藏，结束恢复原策略；全局勾选刷新 rootView，不重测其他卡的用户缩放视口；更新目标结果时重新测量并保留 detached 卡 top-left |
+| 不同方向苹果 host | 卡片方向异于全局时创建临时 `TranslationSessionHolder` + `TranslationHostWindowController`；使用原 `TranslationHostView`，完成/取消 `close()` 清 contentView 与窗口；不修改全局方向及 holder |
+| 预览卡 | 无真实上下文，显示预览标题，不提供服务重译菜单，不伪造服务 |
 
 ## 明确不做
 
@@ -95,7 +98,9 @@ UI 可采用系统下拉控件或 SwiftUI Menu，但必须穿透全卡透明拖�
 | 旧请求/缓存错服务 | 配置屏障、卡片请求身份与关闭状态联合验收；覆盖非合作取消的迟到回复 |
 | 服务不可用或无启用模型 | 既有受控错误；保留旧结果与正确标签，全局服务仍按用户选择持久化 |
 | 旧钉住卡与苹果宿主方向不同 | 卡片保持生成时语言方向。显式苹果请求需要独立的按卡片方向配置的临时 holder/原生 host；与实时全局 host 隔离，请求结束或失效释放。语言包未准备时沿用受控失败，保留旧结果；不修改全局语言方向 |
-| 真实宿主菜单与 focus | 隔离非激活窗口测试可覆盖 native 交互结构；真实应用焦点表现仍需使用反馈 |
+| 新输入与历史卡请求 | 新输入替换/移除活动实时卡时，其请求失效；仍存活的钉住卡和独立剪贴板卡按已显示原文继续重译，只更新自己的 UUID。焦点变化不改换原文；关闭/配置变化/暂停仍会取消 |
+| 原生菜单与 focus | 隔离测试已实际 performClick 打开系统菜单、执行 NSMenuItem action 并收到关闭回调，核验非激活标志；跨真实应用的焦点表现仍需使用反馈 |
+| 苹果语言包及真实 session | 不下载包、不伪造 TranslationSession。隔离测试使用真实 holder 配置和 generation host 的无 translationTask 子视图，核卡片方向与清理；实际语言包准备、native attach 和翻译需实际使用验证 |
 | 模型路由内部回退 | 只标既有「大语言模型 API」服务类别，不承诺展示实际模型名称 |
 
 安全约束：MUST 不重新读取 AX/剪贴板、不读取真实密钥、不自动复制/替换、不把服务错误写作译文、不新增原文或密钥日志。诊断沿用受控类别和状态；不新增遥测。
@@ -122,7 +127,22 @@ UI 可采用系统下拉控件或 SwiftUI Menu，但必须穿透全卡透明拖�
 | D-02 | 全局切换并立即重译所选卡片原文 | 用户 | 用户明确选择 A，后续请求同步新服务 |
 | D-03 | 分句规则不改，保持润物身份及现有服务 | 用户 | 第三项只解释原因，功能增量以现有品牌和服务为基础 |
 | D-04 | 内存卡片上下文、独立显式请求身份、受控失败与 native 交互验收 | agent | 支撑 A 同时避免重新读文本、迟到覆盖、错标签和拖拽层吞点击；无数据库迁移 |
+| D-05 | 每个显式请求持有独立服务/coordinator 配置快照 | agent | 捕获完整模型回退链并隔离实时缓存；代价是显式请求不复用其他卡的缓存 |
+| D-06 | 不同方向苹果会话采用请求级临时 holder/host | agent | 保持卡片原方向与全局方向独立；取消/完成关闭视图；语言包与真实 session 仍需运行时准备 |
+| D-07 | 原生 NSPopUpButton、真实 bounds 穿透、菜单强持有 delegate | agent | 非激活面板可操作，hosting view 刷新后关闭事件仍能恢复计时；视觉使用系统菜单 |
+| D-08 | 全局勾选刷新与目标结果重测分别处理 | agent | 保留其他卡缩放视口，目标长译文可变尺寸但保持 top-left/身份，不重新 show |
+| D-09 | 新输入失效按卡片生命周期判定 | agent | 活动卡被替代/移除则取消；仍存活的历史 pin/clip 继续其显式授权，符合独立卡原文设计。将计划“新输入淘汰旧请求”的宽泛措辞澄清到具体活动卡，无当前输入写回授权 |
 
 ## 实际交付
 
-无（尚未实现；交付时回写实际符号、产物及验证边界）。
+| 交付物 | 内容及验证 |
+| --- | --- |
+| `Sources/Pico/App.swift`、`Overlay.swift`、`L10n.swift` | 两种输入来源保存服务归属；原生菜单同步全局并重译所选卡；独立请求、受控失败、计时/关闭与临时方向宿主 |
+| `Tests/PicoTests/OverlayServiceMetadataTests.swift` | 6 项新测试：五服务双 origin、原文方向、pin/refresh/preview、迟到结果及中英原生头部渲染 |
+| `Tests/PicoTests/OverlayServiceSwitchingTests.swift` | 10 项新测试：五路选择、精确 source、并发失效/非合作取消、资源释放、真正菜单 tracking/action/关闭与 hitTest、窄卡/六主题/长 pin 布局 |
+| `README.md`、本设计 | 操作范围、旧卡标签、失败、预览与分句说明；实际接口和执行期技术裁定归位 |
+| 本地 `润物.app` | 本轮源码构建，继续使用 `com.comeg.runwu` / 0.1.0；验收命令 `swift test && zsh Scripts/build-app.sh && codesign --verify --deep --strict 润物.app` |
+
+相关 83 项回归和新测试的阶段验证通过；原生卡片/真实菜单截图保存在 `.workflow/overlay-service/reports/T2-native/`，该证据目录不进 Git，测试可重新生成。完整测试、release 构建及严格签名由最终工作流验证记录承载。
+
+计划措辞澄清仅有 D-09 所记的新输入与仍存活历史卡边界，无分句、服务协议、历史库迁移或远端发布偏离。主图标、菜单栏图标和已发布 DMG 保留；真实宿主焦点、语言包和真实服务网络未实测，见已知限制。
