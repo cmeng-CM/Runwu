@@ -29,6 +29,8 @@ zsh Scripts/build-dmg.sh
 CODESIGN_IDENTITY='已有签名身份' zsh Scripts/build-app.sh
 ```
 
+当前源码构建显示版本仍为 `0.1.0`，内部构建号为 `2`。启动时只显示菜单栏；通过菜单栏「设置」或 SwiftUI 的设置入口（`⌘,`）打开设置后显示 Dock，全部设置窗口关闭后隐藏 Dock。菜单栏入口的设置窗口最小化后仍保留 Dock，再从菜单栏打开设置或点击 Dock 图标可恢复原窗口；SwiftUI 设置入口保留系统固有窗口能力。翻译卡、欢迎和授权提示不会使 Dock 常驻。这些 Dock 调整需从当前源码构建，已发布的 `润物-0.1.0.dmg` 保持原内容，本次没有替换发行附件。
+
 DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建应用，强制 ad-hoc 签名，不使用继承的 `CODESIGN_IDENTITY` 或 `NOTARY_PROFILE` 执行开发者签名或公证。输出 `dist/润物-0.1.0.dmg`，包含应用和 Applications 链接，创建、校验成功后才替换旧文件。脚本可从其他工作目录通过绝对路径运行，不创建证书、不安装或启动应用。
 
 ## 输入、位置与显式操作
@@ -85,7 +87,7 @@ DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建�
 
 ## 验证与兼容边界
 
-2026-10-09 当前源码全量共 273 项，其中 1 项联网探测默认跳过，执行项均通过；本轮包含服务菜单及重译的隔离原生交互、输入资格的合成红绿回归，以及加载/失败长卡的原生窗口缩放预算回归；不下载苹果语言包。release 构建和严格签名验证通过，留下本地 ad-hoc 签名的 `润物.app`。
+2026-10-09 当前源码全量共 278 项，其中 1 项联网探测默认跳过，0 项失败；本轮包含设置窗口的原生生命周期回归与独立应用 policy 实测、服务菜单及重译的隔离原生交互、输入资格的合成红绿回归，以及加载/失败长卡的原生窗口缩放预算回归；不下载苹果语言包。release 构建和严格签名验证通过，留下本地 ad-hoc 签名的 `润物.app`。
 
 自动化测试覆盖输入会话、组合提交、真实句子范围、多屏坐标、浮窗跟随与固定/钉住行为、两种输入来源的路由和取消、配置隔离、明确只读/禁用/后代焦点、资格失效后的读取与替换保护，以及三家网页 HTTP 夹具。SwiftUI host 回归使用真实 NSHostingView 和生产配置 generation 包装，但不下载语言包或伪造苹果原生翻译 session。
 
@@ -95,7 +97,7 @@ DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建�
 RUNWU_WEB_LIVE_PROBE=1 swift test --filter WebTranslationTests.testLiveAdaptersFixedSentenceProbe
 ```
 
-辅助功能及光标定位依赖宿主实现，不能保证所有应用兼容。真实宿主输入反馈、苹果原生 session attach/语言包和用户自定义模型端点仍需实际使用验证；定位受限时可使用固定模式或剪贴板翻译。实现及维护决策见 [光标与服务设计](docs/designs/caret-translation.md) 和 [浮窗服务菜单设计](docs/designs/overlay-service.md)。
+辅助功能及光标定位依赖宿主实现，不能保证所有应用兼容。真实宿主输入反馈、苹果原生 session attach/语言包和用户自定义模型端点仍需实际使用验证；定位受限时可使用固定模式或剪贴板翻译。实现及维护决策见 [光标与服务设计](docs/designs/caret-translation.md)、[浮窗服务菜单设计](docs/designs/overlay-service.md) 和 [设置窗口与 Dock 设计](docs/designs/dock-visibility.md)。
 
 ## 来源与许可证
 
