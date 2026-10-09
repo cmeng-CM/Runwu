@@ -262,6 +262,7 @@ struct TranslationOverlayView: View {
     var maxBodyHeight: CGFloat = .infinity
     let onClose: () -> Void
     let onCopy: () -> Void
+    var headerTitle: String = "润物"
     var sourceText: String? = nil
     var onHoverChange: (Bool) -> Void = { _ in }
     /// Live body-height updates while the user drags the bottom handle.
@@ -291,10 +292,12 @@ struct TranslationOverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("润物")
+                Text(headerTitle)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .tracking(1.6)
                     .foregroundStyle(theme.accentColor)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("translation-service-title")
                 Spacer(minLength: 8)
                 Button(action: onTogglePin) {
                     Image(systemName: contentPinned ? "pin.fill" : "pin")
@@ -463,6 +466,16 @@ struct OverlayCardContent: Equatable {
     let translation: String
 }
 
+/// Context of an accepted result, independent of global settings and body
+/// presentation. Clipboard cards retain their original input here even when
+/// the body displays only the translation. No credentials or model snapshot.
+struct OverlayTranslationContext: Equatable, Sendable {
+    let sourceText: String
+    let sourceLanguage: Language
+    let targetLanguage: Language
+    let backend: TranslationBackend
+}
+
 /// Placement uses global Cocoa points and the display containing the actual
 /// anchor, including negative origins. It never invents an insertion point.
 struct OverlayFollowingLayout {
@@ -494,6 +507,7 @@ struct OverlayFollowingLayout {
         let panel: NSPanel
         var text: String
         var sourceText: String?
+        var translationContext: OverlayTranslationContext?
         let origin: OverlayOrigin
         var inputAnchor: InputAnchor?
         var isRealtime: Bool { if case .realtime = origin { return true }; return false }
@@ -513,7 +527,8 @@ struct OverlayFollowingLayout {
         /// Lets us detach the didMove observer when the entry goes away.
         var moveObserver: NSObjectProtocol?
         init(id: UUID, key: String, panel: NSPanel, screen: NSScreen?, avoid: NSRect?, text: String,
-            sourceText: String?, origin: OverlayOrigin, inputAnchor: InputAnchor?) {
+            sourceText: String?, origin: OverlayOrigin, inputAnchor: InputAnchor?,
+            translationContext: OverlayTranslationContext?) {
             self.id = id
             self.key = key
             self.panel = panel
@@ -521,6 +536,7 @@ struct OverlayFollowingLayout {
             self.avoid = avoid
             self.text = text
             self.sourceText = sourceText
+            self.translationContext = translationContext
             self.origin = origin
             self.inputAnchor = inputAnchor
         }
@@ -531,6 +547,9 @@ struct OverlayFollowingLayout {
     /// Debug/diagnostic hook: ids of the entries currently on screen.
     var shownEntryIDs: [UUID] { entries.filter { $0.panel.isVisible }.map(\.id) }
     var cardContents: [OverlayCardContent] { entries.map { OverlayCardContent(source: $0.sourceText, translation: $0.text) } }
+    func translationContext(for id: UUID) -> OverlayTranslationContext? {
+        entries.first(where: { $0.id == id })?.translationContext
+    }
     /// Debug/test hook: content views of the panels currently on screen, so
     /// tests can reach the drag catcher and drive its hover callbacks the way
     /// tracking-area delivery does.
@@ -544,6 +563,9 @@ struct OverlayFollowingLayout {
     /// notifications arriving outside these windows are user drags.
     private var isApplyingProgrammaticFrame = false
     var followCaret = true { didSet { if oldValue != followCaret { relayout() } } }
+    var uiLanguage: UILanguage = .chinese {
+        didSet { if oldValue != uiLanguage { refreshAppearance() } }
+    }
     var followingScreenFrames: () -> [NSRect] = { NSScreen.screens.map(\.visibleFrame) }
     var hideAfter: Double = 4
     var neverHide = false
@@ -598,7 +620,8 @@ struct OverlayFollowingLayout {
     }
     func show(_ text: String, on screen: NSScreen?) { show(text, key: UUID().uuidString, on: screen) }
     func show(_ text: String, key: String, on screen: NSScreen?, avoid: NSRect? = nil,
-        sourceText: String? = nil, origin: OverlayOrigin = .fixed, inputAnchor: InputAnchor? = nil) {
+        sourceText: String? = nil, origin: OverlayOrigin = .fixed, inputAnchor: InputAnchor? = nil,
+        translationContext: OverlayTranslationContext? = nil) {
         guard !text.isEmpty else {
             if case .realtime = origin { hideRealtime() }
             else { hideFixedUnpinned() }
@@ -607,6 +630,7 @@ struct OverlayFollowingLayout {
         if let existing = entries.first(where: { $0.key == key && $0.origin == origin && !$0.detached }) {
             existing.text = text
             existing.sourceText = sourceText
+            existing.translationContext = translationContext
             existing.inputAnchor = inputAnchor
             existing.screen = screen ?? existing.screen ?? NSScreen.main
             existing.avoid = avoid
@@ -644,7 +668,7 @@ struct OverlayFollowingLayout {
         panel.alphaValue = CGFloat(min(max(cardOpacity, 0.3), 1))
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let entry = Entry(id: id, key: key, panel: panel, screen: target, avoid: avoid, text: text,
-            sourceText: sourceText, origin: origin, inputAnchor: inputAnchor)
+            sourceText: sourceText, origin: origin, inputAnchor: inputAnchor, translationContext: translationContext)
         entry.moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
         ) { [weak self, weak panel] _ in
@@ -745,6 +769,8 @@ struct OverlayFollowingLayout {
                 _ = TranslationClipboard.copy(text)
                 self?.onCopyToPasteboard?(text)
             },
+            headerTitle: "润物 · " + (entry?.translationContext?.backend.displayName(for: uiLanguage)
+                ?? L10n.previewOverlay(uiLanguage)),
             sourceText: entry?.sourceText,
             onHoverChange: { [weak self] hovering in
                 self?.setHovering(id, hovering)
@@ -899,9 +925,9 @@ struct OverlayFollowingLayout {
         relayout()
     }
     func showRealtime(source: String, translation: String, key: String, session: InputSessionID,
-        anchor: InputAnchor?) {
+        anchor: InputAnchor?, translationContext: OverlayTranslationContext? = nil) {
         show(translation, key: key, on: screen(containing: anchor), avoid: anchor?.fieldFrame, sourceText: source,
-            origin: .realtime(session), inputAnchor: anchor)
+            origin: .realtime(session), inputAnchor: anchor, translationContext: translationContext)
     }
     func updateAnchor(_ anchor: InputAnchor, session: InputSessionID) {
         for entry in entries where entry.origin == .realtime(session) && !entry.detached {

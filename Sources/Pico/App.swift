@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Combine
 import OSLog
 import SwiftUI
 @preconcurrency import Translation
@@ -104,6 +105,7 @@ struct MenuBarMenu: View {
     private let realtime = RealtimeTranslationState()
     private var configurationGeneration: UInt64 = 0
     private var configurationTask: Task<Void, Never>?
+    private var overlayLanguageObservation: AnyCancellable?
     private let runtimeEnabled: Bool
     private var clipboardRequestID: UUID?
     private var pendingOrigin: OverlayOrigin?
@@ -168,6 +170,9 @@ struct MenuBarMenu: View {
         overlay.theme = settings.overlayTheme
         overlay.surface = settings.overlaySurface
         overlay.followCaret = settings.overlayFollowCaret
+        overlayLanguageObservation = store.$uiLanguage.sink { [weak self] language in
+            self?.overlay.uiLanguage = language
+        }
         monitor.onSnapshot = { [weak self] snapshot, session, screen in
             self?.handleInputSnapshot(snapshot, session: session, screen: screen)
         }
@@ -561,6 +566,7 @@ struct MenuBarMenu: View {
                     sourceText: text,
                     sourceLanguage: sourceLanguage,
                     targetLanguage: targetLanguage,
+                    backend: backend,
                     key: sentenceKey,
                     session: session,
                     screen: screen,
@@ -583,6 +589,7 @@ struct MenuBarMenu: View {
         sourceText: String,
         sourceLanguage: Language,
         targetLanguage: Language,
+        backend: TranslationBackend,
         key sentenceKey: String,
         session: InputSessionID,
         screen: NSScreen?,
@@ -618,11 +625,13 @@ struct MenuBarMenu: View {
             retention: settings.historyRetention)
         DiagnosticLog.write("translation result accepted length=\(result.count)")
         logger.info("translation result accepted length=\(result.count, privacy: .public)")
+        let context = OverlayTranslationContext(sourceText: sourceText, sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage, backend: backend)
         if case .realtime = origin {
             overlay.showRealtime(source: sourceText, translation: result, key: sentenceKey,
-                session: session, anchor: realtime.anchor)
+                session: session, anchor: realtime.anchor, translationContext: context)
         } else {
-            overlay.show(result, key: sentenceKey, on: screen, origin: .clipboard)
+            overlay.show(result, key: sentenceKey, on: screen, origin: .clipboard, translationContext: context)
         }
         if speak { speakIfAllowed(result) }
         if pendingAction?.session == session, pendingAction?.sentenceKey == sentenceKey {
@@ -797,7 +806,7 @@ struct MenuBarMenu: View {
             do {
                 let result = try await coordinator.translateThrowing(text, from: sourceLanguage, to: targetLanguage, revision: configuration)
                 self?.acceptTranslationResult(result, sourceText: text, sourceLanguage: sourceLanguage,
-                targetLanguage: targetLanguage, key: sentenceKey, session: session,
+                targetLanguage: targetLanguage, backend: backend, key: sentenceKey, session: session,
                 screen: NSScreen.main, origin: .clipboard, configuration: configuration,
                 clipboardRequest: requestID, speak: false)
             } catch {
