@@ -94,6 +94,14 @@ final class WindowDragCatcherView: NSView {
     // 头部按钮区（复制/关闭/钉住）与底边缩放把手穿透给下层控件
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
+        if let root = window?.contentView {
+            func containsControl(_ view: NSView) -> Bool {
+                if let control = view as? OverlayServicePopUpButton, !control.isHidden,
+                    control.bounds.contains(control.convert(local, from: self)) { return true }
+                return view.subviews.contains(where: containsControl)
+            }
+            if containsControl(root) { return nil }
+        }
         let width = bounds.width, height = bounds.height
         // 三键（钉住/复制/关闭）都在右上：悬停浮现钉住键后让位 104pt，
         // 平时只让位复制/关闭的 70pt
@@ -246,6 +254,74 @@ enum OverlaySizing {
     }
 }
 
+/// A native pull-down participates in AppKit menu tracking without taking focus.
+final class OverlayServicePopUpButton: NSPopUpButton {
+    override var acceptsFirstResponder: Bool { false }
+    override var needsPanelToBecomeKey: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private final class OverlayServiceNativeMenu: NSMenu {
+    // AppKit tracks this menu after an action has replaced the old hosting view.
+    // Keep its delegate alive until menuDidClose balances the timer suspension.
+    var trackingDelegate: NSObject?
+}
+
+private struct OverlayServiceMenu: NSViewRepresentable {
+    let title: String
+    let language: UILanguage
+    let selected: TranslationBackend
+    let color: Color
+    let onSelect: (TranslationBackend) -> Void
+    let onTracking: (Bool) -> Void
+
+    @MainActor final class Coordinator: NSObject, NSMenuDelegate {
+        var parent: OverlayServiceMenu
+        init(_ parent: OverlayServiceMenu) { self.parent = parent }
+        @objc func choose(_ item: NSMenuItem) {
+            guard let raw = item.representedObject as? String,
+                let backend = TranslationBackend(rawValue: raw) else { return }
+            parent.onSelect(backend)
+        }
+        func menuWillOpen(_ menu: NSMenu) { parent.onTracking(true) }
+        func menuDidClose(_ menu: NSMenu) { parent.onTracking(false) }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> OverlayServicePopUpButton {
+        let button = OverlayServicePopUpButton(frame: .zero, pullsDown: true)
+        button.isBordered = false
+        button.font = .monospacedSystemFont(ofSize: 10, weight: .semibold)
+        button.controlSize = .mini
+        button.setAccessibilityIdentifier("translation-service-menu")
+        updateNSView(button, context: context)
+        return button
+    }
+    func updateNSView(_ button: OverlayServicePopUpButton, context: Context) {
+        context.coordinator.parent = self
+        let menu = OverlayServiceNativeMenu()
+        menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        for backend in TranslationBackend.allCases {
+            let item = NSMenuItem(title: backend.displayName(for: language),
+                action: #selector(Coordinator.choose(_:)), keyEquivalent: "")
+            item.target = context.coordinator
+            item.representedObject = backend.rawValue
+            item.state = selected == backend ? .on : .off
+            menu.addItem(item)
+        }
+        menu.trackingDelegate = context.coordinator
+        menu.delegate = context.coordinator
+        button.menu = menu
+        button.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor(color)])
+        button.setAccessibilityLabel(title)
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: OverlayServicePopUpButton, context: Context) -> CGSize? {
+        let size = nsView.intrinsicContentSize
+        return CGSize(width: min(size.width, proposal.width ?? size.width), height: 22)
+    }
+}
+
 struct TranslationOverlayView: View {
     let text: String
     let fontSize: CGFloat
@@ -263,6 +339,11 @@ struct TranslationOverlayView: View {
     let onClose: () -> Void
     let onCopy: () -> Void
     var headerTitle: String = "润物"
+    var serviceLanguage: UILanguage = .chinese
+    var selectedService: TranslationBackend = .local
+    var onServiceSelected: ((TranslationBackend) -> Void)? = nil
+    var onMenuTracking: (Bool) -> Void = { _ in }
+    var serviceStatus: String? = nil
     var sourceText: String? = nil
     var onHoverChange: (Bool) -> Void = { _ in }
     /// Live body-height updates while the user drags the bottom handle.
@@ -292,12 +373,18 @@ struct TranslationOverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
+                if let onServiceSelected {
+                    OverlayServiceMenu(title: headerTitle, language: serviceLanguage,
+                        selected: selectedService, color: theme.accentColor,
+                        onSelect: onServiceSelected, onTracking: onMenuTracking)
+                } else {
                 Text(headerTitle)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .tracking(1.6)
                     .foregroundStyle(theme.accentColor)
                     .lineLimit(1)
                     .accessibilityIdentifier("translation-service-title")
+                }
                 Spacer(minLength: 8)
                 Button(action: onTogglePin) {
                     Image(systemName: contentPinned ? "pin.fill" : "pin")
@@ -332,6 +419,10 @@ struct TranslationOverlayView: View {
                 .buttonStyle(.plain)
                 .onHover { closeHovered = $0 }
                 .accessibilityLabel(Text("Close"))
+            }
+            if let serviceStatus {
+                Text(serviceStatus).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             textBody
         }
@@ -508,6 +599,9 @@ struct OverlayFollowingLayout {
         var text: String
         var sourceText: String?
         var translationContext: OverlayTranslationContext?
+        var pendingBackend: TranslationBackend?
+        var serviceFailure: String?
+        var menuOpen = false
         let origin: OverlayOrigin
         var inputAnchor: InputAnchor?
         var isRealtime: Bool { if case .realtime = origin { return true }; return false }
@@ -562,6 +656,18 @@ struct OverlayFollowingLayout {
     /// True while we move panels ourselves (placement/relayout); didMove
     /// notifications arriving outside these windows are user drags.
     private var isApplyingProgrammaticFrame = false
+    var onServiceSelected: ((UUID, TranslationBackend) -> Void)?
+    var onEntryRemoved: ((UUID) -> Void)?
+    var selectedService: TranslationBackend = .local {
+        didSet {
+            guard oldValue != selectedService else { return }
+            // A global menu checkmark must not remeasure another card's resized body budget.
+            for entry in entries {
+                (entry.panel.contentView as? NSHostingView<TranslationOverlayView>)?.rootView =
+                    makeView(text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
+            }
+        }
+    }
     var followCaret = true { didSet { if oldValue != followCaret { relayout() } } }
     var uiLanguage: UILanguage = .chinese {
         didSet { if oldValue != uiLanguage { refreshAppearance() } }
@@ -694,7 +800,15 @@ struct OverlayFollowingLayout {
     /// Sizes the card for the current text (scrolling when it would exceed the
     /// screen budget) and installs it as the panel's content.
     private func installContent(for entry: Entry) {
-        let chrome = chromeHeight()
+        let status = entry.pendingBackend.map { L10n.overlayRetranslating($0, uiLanguage) } ?? entry.serviceFailure
+        let chrome: CGFloat
+        if entry.translationContext != nil || status != nil {
+            let host = NSHostingView(rootView: makeView(text: "", textHeightLimit: 0, id: entry.id))
+            measurePanel.contentView = host
+            host.layoutSubtreeIfNeeded()
+            chrome = host.fittingSize.height
+            measurePanel.contentView = nil
+        } else { chrome = chromeHeight() }
         let measuredText = entry.sourceText.map { $0 + "\n\n" + entry.text } ?? entry.text
         let naturalText = OverlaySizing.textHeight(
             text: measuredText, fontSize: textSize.points,
@@ -771,6 +885,14 @@ struct OverlayFollowingLayout {
             },
             headerTitle: "润物 · " + (entry?.translationContext?.backend.displayName(for: uiLanguage)
                 ?? L10n.previewOverlay(uiLanguage)),
+            serviceLanguage: uiLanguage,
+            selectedService: selectedService,
+            onServiceSelected: entry?.translationContext == nil ? nil : { [weak self] backend in
+                guard self?.translationContext(for: id) != nil else { return }
+                self?.onServiceSelected?(id, backend)
+            },
+            onMenuTracking: { [weak self] open in self?.setMenuOpen(id, open) },
+            serviceStatus: entry?.pendingBackend.map { L10n.overlayRetranslating($0, uiLanguage) } ?? entry?.serviceFailure,
             sourceText: entry?.sourceText,
             onHoverChange: { [weak self] hovering in
                 self?.setHovering(id, hovering)
@@ -865,7 +987,7 @@ struct OverlayFollowingLayout {
 
     private func scheduleHide(for entry: Entry) {
         // 钉住的卡片不参与自动隐藏，关闭时才消失
-        guard !entry.contentPinned else { return }
+        guard !entry.contentPinned, !entry.menuOpen, entry.pendingBackend == nil else { return }
         entry.hideTask?.cancel()
         guard !neverHide else { return }
         // 光标正压在卡片上时不倒计时（悬停豁免：卡片可能就弹在光标位置，
@@ -892,33 +1014,54 @@ struct OverlayFollowingLayout {
             self?.remove(entry.id)
         }
     }
-    func hide() {
-        for entry in entries {
-            entry.hideTask?.cancel()
-            if let observer = entry.moveObserver { NotificationCenter.default.removeObserver(observer) }
-            entry.panel.orderOut(nil)
-        }
-        entries.removeAll()
+    func hide() { for id in entries.map(\.id) { remove(id) } }
+    func hideUnpinned(except preservedID: UUID? = nil) {
+        for id in entries.filter({ !$0.contentPinned && $0.id != preservedID }).map(\.id) { remove(id) }
     }
 
-    /// 关闭未钉住的卡片，钉住的保留——钉住语义=只随显式关闭消失，凡是
-    /// 「非用户点名关闭」的路径（输入会话清空、replace 换卡、改翻译设置、
-    /// 空文本 show）都必须走这里而不是 hide()，否则切个窗口钉住的卡就没。
-    func hideUnpinned() {
-        for entry in entries where !entry.contentPinned {
-            entry.hideTask?.cancel()
-            if let observer = entry.moveObserver { NotificationCenter.default.removeObserver(observer) }
-            entry.panel.orderOut(nil)
-        }
-        entries.removeAll { !$0.contentPinned }
-        relayout()
+    func setMenuOpen(_ id: UUID, _ open: Bool) {
+        guard let entry = entries.first(where: { $0.id == id }) else { return }
+        entry.menuOpen = open
+        if open { entry.hideTask?.cancel() } else { scheduleHide(for: entry) }
     }
+    func isMenuOpen(_ id: UUID) -> Bool { entries.first(where: { $0.id == id })?.menuOpen ?? false }
+    func pendingService(for id: UUID) -> TranslationBackend? {
+        entries.first(where: { $0.id == id })?.pendingBackend
+    }
+    func serviceFailure(for id: UUID) -> String? { entries.first(where: { $0.id == id })?.serviceFailure }
+    func beginRetranslation(_ id: UUID, backend: TranslationBackend) {
+        guard let entry = entries.first(where: { $0.id == id }) else { return }
+        entry.hideTask?.cancel()
+        entry.pendingBackend = backend
+        entry.serviceFailure = nil
+        resizeRetranslation(entry)
+    }
+    private func resizeRetranslation(_ entry: Entry) {
+        let top = entry.panel.frame.maxY, x = entry.panel.frame.minX
+        installContent(for: entry)
+        if entry.detached, let view = entry.panel.contentView {
+            var size = view.fittingSize
+            if let height = entry.plannedCardHeight { size.height = height }
+            entry.panel.setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
+        } else { relayout() }
+    }
+    func finishRetranslation(_ id: UUID, result: String? = nil,
+        context: OverlayTranslationContext? = nil, failure: String? = nil) {
+        guard let entry = entries.first(where: { $0.id == id }) else { return }
+        entry.pendingBackend = nil
+        entry.serviceFailure = failure
+        if let result, let context { entry.text = result; entry.translationContext = context }
+        resizeRetranslation(entry)
+        scheduleHide(for: entry)
+    }
+
     private func remove(_ id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         let entry = entries.remove(at: index)
         entry.hideTask?.cancel()
         if let observer = entry.moveObserver { NotificationCenter.default.removeObserver(observer) }
         entry.panel.orderOut(nil)
+        onEntryRemoved?(id)
         // Relayout each remaining panel on its own screen so closing one
         // overlay on a secondary display does not move the others to the main
         // screen.
@@ -936,8 +1079,8 @@ struct OverlayFollowingLayout {
         }
         relayout()
     }
-    func hideRealtime() {
-        for id in entries.filter({ $0.isRealtime && !$0.detached }).map(\.id) { remove(id) }
+    func hideRealtime(except preservedID: UUID? = nil) {
+        for id in entries.filter({ $0.isRealtime && !$0.detached && $0.id != preservedID }).map(\.id) { remove(id) }
     }
     private func hideFixedUnpinned() {
         for id in entries.filter({ !$0.isRealtime && !$0.contentPinned }).map(\.id) { remove(id) }

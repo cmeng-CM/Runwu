@@ -106,6 +106,22 @@ struct MenuBarMenu: View {
     private var configurationGeneration: UInt64 = 0
     private var configurationTask: Task<Void, Never>?
     private var overlayLanguageObservation: AnyCancellable?
+    private var overlayBackendObservation: AnyCancellable?
+    private let overlayEngines: [TranslationBackend: any TranslationEngine]
+    private let overlayModelFactory: TranslationService.ModelFactory
+    private var preservedServiceCard: UUID?
+    private struct CardRequest {
+        let id: UUID
+        let configuration: UInt64
+        let coordinator: TranslationCoordinator
+        var task: Task<Void, Never>?
+        var holder: TranslationSessionHolder?
+        var host: TranslationHostWindowController?
+    }
+    private var cardRequests: [UUID: CardRequest] = [:]
+    var temporaryOverlayHostConfigurations: [TranslationHostConfiguration] {
+        cardRequests.values.compactMap { $0.holder?.hostConfiguration }
+    }
     private let runtimeEnabled: Bool
     private var clipboardRequestID: UUID?
     private var pendingOrigin: OverlayOrigin?
@@ -141,6 +157,8 @@ struct MenuBarMenu: View {
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         pasteboardWatcher = PasteboardWatcher(pasteboard: clipboardReader)
         runtimeEnabled = startRuntime
+        overlayEngines = engines
+        overlayModelFactory = modelFactory
         autoUpdater = AutoUpdateController(settings: store)
         enabled = enabledValue
         permissionGranted = trustedValue
@@ -173,6 +191,11 @@ struct MenuBarMenu: View {
         overlayLanguageObservation = store.$uiLanguage.sink { [weak self] language in
             self?.overlay.uiLanguage = language
         }
+        overlayBackendObservation = store.$translationBackend.sink { [weak self] backend in
+            self?.overlay.selectedService = backend
+        }
+        overlay.onServiceSelected = { [weak self] id, backend in self?.selectOverlayService(id, backend: backend) }
+        overlay.onEntryRemoved = { [weak self] id in self?.cancelCardRequest(id) }
         monitor.onSnapshot = { [weak self] snapshot, session, screen in
             self?.handleInputSnapshot(snapshot, session: session, screen: screen)
         }
@@ -205,7 +228,8 @@ struct MenuBarMenu: View {
             self?.translate(text, sentenceKey: sentenceKey, session: session, screen: screen, snapshot: snapshot)
         }
         input.onEmpty = { [weak self] in
-            self?.invalidateRealtime()
+            guard let self else { return }
+            self.invalidateRealtime(preservingEntry: self.preservedServiceCard)
         }
         guard startRuntime else { return }
         if permissionGranted && enabled {
@@ -321,13 +345,14 @@ struct MenuBarMenu: View {
         configurationGeneration &+= 1
         let revision = configurationGeneration
         let previousConfiguration = configurationTask
+        cancelAllCardRequests()
         clipboardRequestID = nil
-        invalidateRealtime(clearAnchor: true)
+        invalidateRealtime(clearAnchor: true, preservingEntry: preservedServiceCard)
         input.setSourceLanguage(source)
         monitor.sourceLanguage = source
         translationHolder.configure(source: source, target: target)
         clearPendingAction()
-        overlay.hideUnpinned()
+        overlay.hideUnpinned(except: preservedServiceCard)
         speech.stop()
         clearFailure(realtime: true)
         clearFailure(realtime: false)
@@ -348,6 +373,81 @@ struct MenuBarMenu: View {
         await barrier?.value
         return enabled && configurationGeneration == revision && !Task.isCancelled
     }
+    /// Explicit card authorization uses its accepted input, never current AX or clipboard contents.
+    func selectOverlayService(_ cardID: UUID, backend: TranslationBackend) {
+        guard enabled, let context = overlay.translationContext(for: cardID) else { return }
+        if context.backend == backend, settings.translationBackend == backend, cardRequests[cardID] == nil { return }
+        preservedServiceCard = cardID
+        if settings.translationBackend != backend { settings.translationBackend = backend }
+        preservedServiceCard = nil
+        guard overlay.translationContext(for: cardID) != nil else { return }
+        cancelCardRequest(cardID)
+        let configuration = configurationGeneration
+        let requestID = UUID()
+        let models = settings.llmModels, timeout = settings.llmFallbackTimeout
+        var holder: TranslationSessionHolder?
+        var host: TranslationHostWindowController?
+        var localHolder = translationHolder
+        if backend == .local,
+            (context.sourceLanguage != settings.sourceLanguage || context.targetLanguage != settings.targetLanguage) {
+            let temporary = TranslationSessionHolder()
+            temporary.configure(source: context.sourceLanguage, target: context.targetLanguage)
+            holder = temporary
+            localHolder = temporary
+            host = TranslationHostWindowController(holder: temporary, nativeTasksEnabled: runtimeEnabled)
+        }
+        // Each operation owns an immutable service configuration, including the whole model fallback chain.
+        let service = TranslationService(localEngine: HostedTranslationEngine(holder: localHolder),
+            backend: backend, models: models, timeoutSeconds: timeout,
+            engines: overlayEngines, modelFactory: overlayModelFactory)
+        let requestCoordinator = TranslationCoordinator(engine: service,
+            sourceLanguage: context.sourceLanguage, targetLanguage: context.targetLanguage)
+        cardRequests[cardID] = CardRequest(id: requestID, configuration: configuration, coordinator: requestCoordinator, holder: holder, host: host)
+        overlay.beginRetranslation(cardID, backend: backend)
+        let task = Task { [weak self] in
+            guard let self, await self.configurationReady(configuration),
+                self.acceptsCardRequest(cardID, requestID, configuration) else { return }
+            do {
+                let result = try await requestCoordinator.translateThrowing(context.sourceText,
+                    from: context.sourceLanguage, to: context.targetLanguage)
+                guard self.acceptsCardRequest(cardID, requestID, configuration) else { return }
+                self.releaseCardRequest(cardID)
+                let updated = OverlayTranslationContext(sourceText: context.sourceText,
+                    sourceLanguage: context.sourceLanguage, targetLanguage: context.targetLanguage, backend: backend)
+                self.overlay.finishRetranslation(cardID, result: result, context: updated)
+                self.history.record(sourceText: context.sourceText, translatedText: result,
+                    sourceLanguage: context.sourceLanguage, targetLanguage: context.targetLanguage,
+                    retention: self.settings.historyRetention)
+            } catch {
+                guard self.acceptsCardRequest(cardID, requestID, configuration) else { return }
+                self.releaseCardRequest(cardID)
+                let failure = error is CancellationError ? nil
+                    : TranslationFailureMessage.text(for: error, backend: backend, language: self.settings.uiLanguage)
+                self.overlay.finishRetranslation(cardID, failure: failure)
+            }
+        }
+        cardRequests[cardID]?.task = task
+    }
+    private func acceptsCardRequest(_ card: UUID, _ request: UUID, _ configuration: UInt64) -> Bool {
+        enabled && !Task.isCancelled && configurationGeneration == configuration
+            && cardRequests[card]?.id == request && cardRequests[card]?.configuration == configuration
+            && overlay.translationContext(for: card) != nil
+    }
+    private func releaseCardRequest(_ id: UUID) {
+        let request = cardRequests.removeValue(forKey: id)
+        request?.host?.close()
+    }
+    private func cancelCardRequest(_ id: UUID) {
+        guard let request = cardRequests.removeValue(forKey: id) else { return }
+        request.task?.cancel()
+        Task { await request.coordinator.cancel() }
+        request.host?.close()
+        overlay.finishRetranslation(id)
+    }
+    private func cancelAllCardRequests() {
+        for id in Array(cardRequests.keys) { cancelCardRequest(id) }
+    }
+
     func toggle() {
         enabled.toggle()
         settings.enabled = enabled
@@ -515,14 +615,14 @@ struct MenuBarMenu: View {
         }
         if feedInput { input.handle(snapshot, session: session, screen: screen) }
     }
-    private func invalidateRealtime(clearAnchor: Bool = false) {
+    private func invalidateRealtime(clearAnchor: Bool = false, preservingEntry: UUID? = nil) {
         realtime.invalidate(clearAnchor: clearAnchor)
-        clearRealtimePresentation()
+        clearRealtimePresentation(preservingEntry: preservingEntry)
     }
-    private func clearRealtimePresentation() {
+    private func clearRealtimePresentation(preservingEntry: UUID? = nil) {
         clearFailure(realtime: true)
         if case .realtime = pendingOrigin { clearPendingAction() }
-        overlay.hideRealtime()
+        overlay.hideRealtime(except: preservingEntry)
         speech.stop()
         let mutation = realtime.mutationID
         let coordinator = coordinator
@@ -1085,7 +1185,7 @@ private struct TranslationHostTaskView: View {
 @MainActor final class TranslationHostWindowController {
     private let window: NSWindow
 
-    init(holder: TranslationSessionHolder) {
+    init(holder: TranslationSessionHolder, nativeTasksEnabled: Bool = true) {
         let panel = NSPanel(
             contentRect: NSRect(x: -2000, y: -2000, width: 8, height: 8),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -1100,8 +1200,20 @@ private struct TranslationHostTaskView: View {
         panel.backgroundColor = .clear
         panel.alphaValue = 0.01
         panel.ignoresMouseEvents = true
-        panel.contentView = NSHostingView(rootView: TranslationHostView(holder: holder))
+        if nativeTasksEnabled {
+            panel.contentView = NSHostingView(rootView: TranslationHostView(holder: holder))
+        } else {
+            // Isolated harness uses the same observed generation boundary without requesting language packages.
+            panel.contentView = NSHostingView(rootView: TranslationHostGenerationView(holder: holder) { _ in
+                Color.clear.frame(width: 1, height: 1)
+            })
+        }
         panel.orderFrontRegardless()
         window = panel
+    }
+    func close() {
+        window.orderOut(nil)
+        window.contentView = nil
+        window.close()
     }
 }

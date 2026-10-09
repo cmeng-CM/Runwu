@@ -722,4 +722,9 @@ enum L10n {
     static func aboutContactAuthor(_ lang: UILanguage) -> String {
         lang == .chinese ? "联系作者" : "Contact the author"
     }
+    static func overlayRetranslating(_ backend: TranslationBackend, _ lang: UILanguage) -> String {
+        let service = backend.displayName(for: lang)
+        return lang == .chinese ? "正在用\(service)重新翻译…" : "Retranslating with \(service)…"
+    }
+
 }
