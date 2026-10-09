@@ -595,6 +595,7 @@ struct SettingsView: View {
             contentArea
         }
         .frame(minWidth: 820, idealWidth: 900, minHeight: 560, idealHeight: 680)
+        .background(SettingsWindowHook(controller: state.settingsDockController, title: L10n.settingsWindowTitle(lang)))
         .onAppear { state.updateSettingsWindowTitle() }
         .onChange(of: settings.uiLanguage) { _, _ in state.updateSettingsWindowTitle() }
     }

@@ -45,13 +45,17 @@ struct MenuBarMenu: View {
         state = AppState()
         super.init()
     }
+    init(state: AppState) {
+        self.state = state
+        super.init()
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        state.settingsDockController.start()
         state.startTranslationHost()
     }
-    /// Clicking the Dock icon with no visible windows opens settings, so the
-    /// app is always configurable even when the menu bar item is hard to spot.
+    /// Restore settings even when a translation or welcome window is visible.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { state.presentSettings() }
+        if !state.settingsDockController.restoreOpenSettingsWindow() { state.presentSettings() }
         return true
     }
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -86,6 +90,7 @@ struct MenuBarMenu: View {
     @Published var permissionGranted: Bool
     @Published var showWelcome: Bool
     var settings: SettingsStore
+    let settingsDockController: SettingsDockController
     let permission = AccessibilityPermissionManager()
     let monitor = AccessibilityMonitor()
     let input = InputCoordinator()
@@ -140,7 +145,8 @@ struct MenuBarMenu: View {
         modelFactory: @escaping TranslationService.ModelFactory = { LLMModelRouter(models: $0, timeoutSeconds: $1) },
         speech suppliedSpeech: (any SpeechPerforming)? = nil,
         clipboardReader: any PasteboardReading = SystemPasteboard(),
-        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) {
+        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
+        settingsDockController: SettingsDockController = .shared) {
         let enabledValue = store.enabled
         let trustedValue = startRuntime && AXIsProcessTrusted()
         let welcomeValue = startRuntime && !UserDefaults.standard.bool(forKey: "onboardingComplete")
@@ -153,6 +159,7 @@ struct MenuBarMenu: View {
             timeoutSeconds: store.llmFallbackTimeout, engines: engines, modelFactory: modelFactory)
         let historyController = TranslationHistoryController(databaseURL: historyDatabaseURL)
         settings = store
+        self.settingsDockController = settingsDockController
         self.clipboardReader = clipboardReader
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         pasteboardWatcher = PasteboardWatcher(pasteboard: clipboardReader)
@@ -297,7 +304,7 @@ struct MenuBarMenu: View {
         }
     }
     func startTranslationHost() {
-        guard translationHostWindow == nil else { return }
+        guard runtimeEnabled, translationHostWindow == nil else { return }
         translationHostWindow = TranslationHostWindowController(holder: translationHolder)
         startMenuBarWatchdog()
     }
@@ -524,13 +531,11 @@ struct MenuBarMenu: View {
         welcomeWindow?.close()
         welcomeWindow = nil
     }
-    func presentSettings() {
+    @discardableResult func presentSettings() -> NSWindow {
         if let settingsWindow {
             updateSettingsWindowTitle()
-            settingsWindow.orderFrontRegardless()
-            settingsWindow.makeKey()
-            NSApp.activate(ignoringOtherApps: true)
-            return
+            settingsDockController.showSettingsWindow(settingsWindow)
+            return settingsWindow
         }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 840, height: 700),
@@ -543,10 +548,9 @@ struct MenuBarMenu: View {
         window.setContentSize(NSSize(width: 840, height: 700))
         centerOnMainScreen(window)
         window.isReleasedWhenClosed = false
-        window.orderFrontRegardless()
-        window.makeKey()
-        NSApp.activate(ignoringOtherApps: true)
         settingsWindow = window
+        settingsDockController.showSettingsWindow(window)
+        return window
     }
     /// macOS 26: center() can land a window off-screen (seen on the overlay
     /// prompt); pin the window to the main screen center explicitly.
