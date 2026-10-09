@@ -1080,8 +1080,8 @@ struct AboutView: View {
                 urlString: "https://github.com/cmeng-CM/Runwu")
             aboutLinkRow(
                 label: L10n.aboutContactAuthor(language),
-                title: "xinzhu400@gmail.com",
-                urlString: "mailto:xinzhu400@gmail.com")
+                title: "cmeng.email@gmail.com",
+                urlString: "mailto:cmeng.email@gmail.com")
         }
         .padding(28)
         .frame(maxWidth: 420)
