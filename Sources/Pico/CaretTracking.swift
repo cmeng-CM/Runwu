@@ -73,6 +73,10 @@ struct AXFieldAccess {
     var enableAccessibility: (AXUIElement) -> Void
     var hitTest: (NSPoint) -> AXUIElement?
     var beginRead: () -> Void = {}
+    var writeAttribute: (AXUIElement, String, CFTypeRef) -> AXError = { element, key, value in
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        return AXUIElementSetAttributeValue(element, key as CFString, value)
+    }
 
     func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
         readAttribute(element, key).value
@@ -100,6 +104,10 @@ struct AXFieldAccess {
         result.hitTest = { point in
             guard now() < deadline else { return nil }
             return original.hitTest(point)
+        }
+        result.writeAttribute = { element, key, value in
+            guard now() < deadline else { return .cannotComplete }
+            return original.writeAttribute(element, key, value)
         }
         result.enableAccessibility = { element in
             guard now() < deadline else { return }
@@ -182,32 +190,65 @@ struct AXFieldReader {
         return true
     }
 
-    func editable(_ element: AXUIElement) -> Bool {
-        let role = access.attribute(element, kAXRoleAttribute as String) as? String ?? ""
-        return [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String].contains(role)
-            || access.attribute(element, "AXEditable") as? Bool == true
+    /// Unsupported optional native metadata retains compatibility; explicit
+    /// false, malformed values and real AX errors never fall back to the role.
+    private func optionalBoolean(_ element: AXUIElement, _ key: String) -> (valid: Bool, value: Bool?) {
+        let result = access.readAttribute(element, key)
+        guard result.permitsOptionalMetadata else { return (false, nil) }
+        guard let value = result.value else { return (true, nil) }
+        guard CFGetTypeID(value) == CFBooleanGetTypeID(), let boolean = value as? Bool else { return (false, nil) }
+        return (true, boolean)
     }
 
-    func resolve(_ element: AXUIElement, pid: pid_t, depth: Int = 5) -> AXUIElement? {
+    private enum EditingQualification { case editor, container, rejected }
+    private func editingQualification(_ element: AXUIElement) -> EditingQualification {
+        let enabled = optionalBoolean(element, kAXEnabledAttribute as String)
+        guard enabled.valid, enabled.value != false else { return .rejected }
+        let editable = optionalBoolean(element, "AXEditable")
+        guard editable.valid, editable.value != false else { return .rejected }
+        if editable.value == true { return .editor }
+        guard let role = access.attribute(element, kAXRoleAttribute as String) as? String else { return .rejected }
+        return [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String].contains(role)
+            ? .editor : .container
+    }
+    func editable(_ element: AXUIElement) -> Bool { editingQualification(element) == .editor }
+
+    func eligible(_ element: AXUIElement, pid: pid_t, requiresExplicitFocus: Bool = false) -> Bool {
+        guard safe(element, pid: pid) else { return false }
+        let focus = optionalBoolean(element, kAXFocusedAttribute as String)
+        guard focus.valid, focus.value != false,
+            !requiresExplicitFocus || focus.value == true else { return false }
+        return editable(element)
+    }
+
+    func resolve(_ element: AXUIElement, pid: pid_t, depth: Int = 5,
+        requiresExplicitFocus: Bool = false) -> AXUIElement? {
         var remaining = 32
-        func visit(_ candidate: AXUIElement, depth: Int) -> AXUIElement? {
+        func visit(_ candidate: AXUIElement, depth: Int, isRoot: Bool) -> AXUIElement? {
             guard remaining > 0 else { return nil }
             remaining -= 1
             guard safe(candidate, pid: pid) else { return nil }
-            if editable(candidate) { return candidate }
-            guard depth > 0, let children = access.attribute(candidate, kAXChildrenAttribute as String) as? [AXUIElement]
-            else { return nil }
+            let focus = optionalBoolean(candidate, kAXFocusedAttribute as String)
+            guard focus.valid else { return nil }
+            guard focus.value != false else { return nil }
+            let editing = editingQualification(candidate)
+            guard editing != .rejected else { return nil }
+            let hasFocus = (!requiresExplicitFocus && isRoot) || focus.value == true
+            if hasFocus, editing == .editor { return candidate }
+            guard depth > 0,
+                let children = access.attribute(candidate, kAXChildrenAttribute as String) as? [AXUIElement] else { return nil }
             for child in children {
-                if let resolved = visit(child, depth: depth - 1) { return resolved }
+                if let resolved = visit(child, depth: depth - 1, isRoot: false) { return resolved }
             }
             return nil
         }
-        return visit(element, depth: depth)
+        return visit(element, depth: depth, isRoot: true)
     }
 
     func geometry(_ element: AXUIElement, pid: pid_t, bundleID: String?, excluded: Set<String>,
-        layout: InputScreenLayout) -> Geometry? {
-        guard !excluded.contains(bundleID ?? ""), safe(element, pid: pid), editable(element) else { return nil }
+        layout: InputScreenLayout, requiresExplicitFocus: Bool = false) -> Geometry? {
+        guard !excluded.contains(bundleID ?? ""),
+            eligible(element, pid: pid, requiresExplicitFocus: requiresExplicitFocus) else { return nil }
         let selected = range(access.attribute(element, kAXSelectedTextRangeAttribute as String))
         let marked = access.readAttribute(element, "AXTextInputMarkedRange")
         let composing: Bool? = marked.permitsOptionalMetadata

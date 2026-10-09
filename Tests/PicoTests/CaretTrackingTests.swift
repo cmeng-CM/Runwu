@@ -462,6 +462,7 @@ private final class AXFixture {
                 return (secureElement.map { CFEqual(element, $0) } == true ? "AXSecureTextField" : "") as CFString
             case "AXProtectedContent": return kCFBooleanFalse
             case "AXPlaceholderValue": return label.map { $0 as CFString }
+            case "AXEditable", "AXEnabled": return kCFBooleanTrue
             case "AXFocused": return hitFocused ? kCFBooleanTrue : kCFBooleanFalse
             case "AXChildren":
                 childReads += 1; return [first] as CFArray

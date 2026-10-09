@@ -160,6 +160,7 @@ public struct InputSessionID: Hashable, Sendable {
     private let screenFrames: () -> [NSRect]
     private var appObserver: NSObjectProtocol?, elementObserver: AXObserver?, pollTimer: Timer?
     private var focused: AXUIElement?, focusedApp: AXUIElement?, observedWindow: AXUIElement?
+    private var focusedRequiresExplicitFocus = false
     private var application: MonitoredApplication?
     private var session = InputSessionID(pid: 0)
     private var lastText: String?, lastGoodText: String?, lastSelectedRange: NSRange?, lastComposing: Bool?
@@ -242,8 +243,10 @@ public struct InputSessionID: Hashable, Sendable {
         }
         let raw = reader.access.attribute(focusedApp, kAXFocusedUIElementAttribute as String)
         var candidate: AXUIElement?
+        var authoritative = false
         if let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() {
             candidate = (raw as! AXUIElement)
+            authoritative = true
         } else {
             let point = InputScreenLayout(frames: screenFrames()).axPoint(NSEvent.mouseLocation)
             if let hit = reader.access.hitTest(point), reader.safe(hit, pid: app.pid),
@@ -251,16 +254,20 @@ public struct InputSessionID: Hashable, Sendable {
                 candidate = hit
             }
         }
-        let resolved = candidate.flatMap { reader.resolve($0, pid: app.pid) }
-        setFocused(resolved)
+        let resolved = candidate.flatMap {
+            reader.resolve($0, pid: app.pid, requiresExplicitFocus: !authoritative)
+        }
+        let isDescendant = candidate.flatMap { root in resolved.map { !CFEqual(root, $0) } } ?? false
+        setFocused(resolved, requiresExplicitFocus: !authoritative || isDescendant)
     }
 
-    private func setFocused(_ element: AXUIElement?, force: Bool = false) {
+    private func setFocused(_ element: AXUIElement?, force: Bool = false, requiresExplicitFocus: Bool = false) {
         let same = focused == nil && element == nil
             || focused.flatMap { old in element.map { CFEqual(old, $0) } } == true
-        guard force || !same else { return }
+        guard force || !same || focusedRequiresExplicitFocus != requiresExplicitFocus else { return }
         unobserveField()
         focused = element
+        focusedRequiresExplicitFocus = requiresExplicitFocus
         invalidateInput()
         if isRunning, let element { observeField(element) }
     }
@@ -329,9 +336,14 @@ public struct InputSessionID: Hashable, Sendable {
     }
 
     private func capture(force: Bool) -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)? {
-        guard let app = application, currentApplication()?.pid == app.pid, let element = focused,
+        guard let app = application, let element = focused else { return nil }
+        guard currentApplication()?.pid == app.pid,
             let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
-                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())) else { return nil }
+                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames()),
+                requiresExplicitFocus: focusedRequiresExplicitFocus) else {
+            setFocused(nil)
+            return nil
+        }
         guard let composing = geometry.isComposing else {
             // Reject unreadable marked state before AXValue/shortcut recovery.
             // Rotate request identity and clear dedup even for identical text.
@@ -349,13 +361,10 @@ public struct InputSessionID: Hashable, Sendable {
             onAnchorChanged?(geometry.anchor, capturedSession)
         }
         guard session == capturedSession else { return nil }
-        guard currentApplication()?.pid == app.pid, !excludedBundleIDs.contains(app.bundleID ?? ""),
-            reader.safe(element, pid: app.pid) else {
-            setFocused(nil)
-            return nil
-        }
+        guard permitsContent(element, app: app) else { return nil }
         if force, composing { return nil }
         let read = reader.text(element)
+        guard session == capturedSession, permitsContent(element, app: app) else { return nil }
         guard let text = read ?? ((force || composing) ? "" : nil) else { return nil }
         let snapshot = TextSnapshot(pid: app.pid, bundleIdentifier: app.bundleID, text: text,
             selectedRange: geometry.selectedRange, fieldFrame: geometry.anchor.fieldFrame,
@@ -403,30 +412,58 @@ public struct InputSessionID: Hashable, Sendable {
         return "probe target=\(target.bundleID) result=text_element_found role=\(role)"
     }
 
+    /// Recheck the same qualification before value reads and replacement writes;
+    /// failed capabilities clear recovery/session and synchronously invalidate App work.
+    private func permitsContent(_ element: AXUIElement, app: MonitoredApplication) -> Bool {
+        guard currentApplication()?.pid == app.pid,
+            focused.map({ CFEqual($0, element) }) == true,
+            !excludedBundleIDs.contains(app.bundleID ?? ""),
+            reader.eligible(element, pid: app.pid, requiresExplicitFocus: focusedRequiresExplicitFocus) else {
+            setFocused(nil)
+            return false
+        }
+        if !focusedRequiresExplicitFocus {
+            // Native fields may omit AXFocused. Their authority is the app's
+            // current focused element, rechecked across callbacks and writes.
+            guard let focusedApp,
+                let raw = reader.access.attribute(focusedApp, kAXFocusedUIElementAttribute as String),
+                CFGetTypeID(raw) == AXUIElementGetTypeID(), CFEqual(raw, element) else {
+                setFocused(nil)
+                return false
+            }
+        }
+        return true
+    }
+
     func replace(sourceWithTerminator: String, translation: String, range: NSRange? = nil,
         expectedSession: InputSessionID? = nil) -> Bool {
         reader.access.beginRead()
         refreshCurrentFocus()
-        guard let app = application, let element = focused,
-            let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
-                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames())),
-            geometry.isComposing == false, expectedSession == nil || expectedSession == session else { return false }
+        guard let app = application, let element = focused else { return false }
+        guard let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
+            excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames()),
+            requiresExplicitFocus: focusedRequiresExplicitFocus) else {
+            setFocused(nil)
+            return false
+        }
+        guard let composing = geometry.isComposing else { invalidateInput(); return false }
+        guard !composing, expectedSession == nil || expectedSession == session else { return false }
         if let range {
             guard let caret = geometry.selectedRange?.location, range.location >= 0,
                 range.length >= 0, range.length <= Int.max - range.location,
                 caret >= range.location, caret <= range.location + range.length else { return false }
         }
-        guard currentApplication()?.pid == app.pid, reader.safe(element, pid: app.pid) else { return false }
+        guard permitsContent(element, app: app) else { return false }
         let current = reader.text(element)
         return FocusedFieldReplacer.replace(currentText: current, sourceWithTerminator: sourceWithTerminator,
             translation: translation, range: range) { text, caret in
-            guard currentApplication()?.pid == app.pid, expectedSession == nil || expectedSession == session,
-                reader.safe(element, pid: app.pid) else { return false }
-            guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success
+            guard permitsContent(element, app: app), expectedSession == nil || expectedSession == session else { return false }
+            guard reader.access.writeAttribute(element, kAXValueAttribute as String, text as CFTypeRef) == .success
             else { return false }
+            guard permitsContent(element, app: app), expectedSession == nil || expectedSession == session else { return false }
             var range = CFRange(location: caret, length: 0)
             if let value = AXValueCreate(.cfRange, &range) {
-                AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
+                _ = reader.access.writeAttribute(element, kAXSelectedTextRangeAttribute as String, value)
             }
             lastText = text
             lastGoodText = text
