@@ -610,6 +610,9 @@ struct OverlayFollowingLayout {
         /// Set when the card scrolls: the panel height is a fixed budget
         /// instead of the (collapsed) fitting size of a scroll view.
         var plannedCardHeight: CGFloat?
+        /// Actual installed header/status/padding budget, reused during every
+        /// drag event and settle without constructing another measurement host.
+        var chromeHeight: CGFloat = 0
         weak var screen: NSScreen?
         var avoid: NSRect?
         var slot: OverlayPosition?
@@ -809,6 +812,7 @@ struct OverlayFollowingLayout {
             chrome = host.fittingSize.height
             measurePanel.contentView = nil
         } else { chrome = chromeHeight() }
+        entry.chromeHeight = chrome
         let measuredText = entry.sourceText.map { $0 + "\n\n" + entry.text } ?? entry.text
         let naturalText = OverlaySizing.textHeight(
             text: measuredText, fontSize: textSize.points,
@@ -920,7 +924,7 @@ struct OverlayFollowingLayout {
     /// marks the card user-placed.
     private func recordResize(of id: UUID, to bodyHeight: CGFloat) {
         guard let entry = entries.first(where: { $0.id == id }) else { return }
-        let chrome = chromeHeight()
+        let chrome = entry.chromeHeight
         entry.textHeightLimit = bodyHeight
         entry.plannedCardHeight = bodyHeight + chrome
         entry.isPinned = true
@@ -932,7 +936,7 @@ struct OverlayFollowingLayout {
     /// value avoids fighting the hosting view's content sizing.
     func settleResize(of id: UUID, to bodyHeight: CGFloat) {
         guard let entry = entries.first(where: { $0.id == id }) else { return }
-        let chrome = chromeHeight()
+        let chrome = entry.chromeHeight
         let clamped = min(max(bodyHeight, 90), 4000)
         entry.textHeightLimit = clamped
         entry.plannedCardHeight = clamped + chrome

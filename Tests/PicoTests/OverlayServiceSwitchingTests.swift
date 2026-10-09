@@ -204,6 +204,72 @@ import XCTest
         }
     }
 
+    func testStatusCardNativeResizeKeepsMeasuredChromeBodyBudgetAndControls() async throws {
+        for contentPinned in [false, true] {
+            for state in ["loading", "failure", "plain"] {
+                let overlay = OverlayCoordinator()
+                overlay.neverHide = true
+                defer { overlay.hide() }
+                let context = OverlayTranslationContext(sourceText: "保存的原文。", sourceLanguage: .chinese,
+                    targetLanguage: .english, backend: .google)
+                // Use a real result card with the native service menu and header controls.
+                overlay.show(String(repeating: "Long translated paragraph. ", count: 160), key: state,
+                    on: NSScreen.main, origin: .clipboard, translationContext: context)
+                let id = try XCTUnwrap(overlay.shownEntryIDs.first)
+                if contentPinned { overlay.togglePin(of: id) }
+                if state == "loading" { overlay.beginRetranslation(id, backend: .bing) }
+                if state == "failure" { overlay.finishRetranslation(id, failure: "服务暂时不可用，请稍后重试。") }
+                let host = try XCTUnwrap(overlay.panelContentViews.first as? NSHostingView<TranslationOverlayView>)
+                let panel = try XCTUnwrap(host.window)
+                host.layoutSubtreeIfNeeded()
+                let initialBody = try XCTUnwrap(host.rootView.textHeightLimit)
+                let chrome = panel.frame.height - initialBody
+                let x = panel.frame.minX, top = panel.frame.maxY
+                XCTAssertEqual(host.rootView.serviceStatus != nil, state != "plain")
+                for body: CGFloat in [180, 240] {
+                    // Drive the installed view's drag callbacks, then let its recorded
+                    // limit render through the existing menu-checkmark refresh path.
+                    host.rootView.onResize(body)
+                    overlay.selectedService = overlay.selectedService == .local ? .bing : .local
+                    host.layoutSubtreeIfNeeded()
+                    // Unpinned clipboard relayout consumes recordResize's planned
+                    // budget independently of the final settle calculation.
+                    if !contentPinned {
+                        overlay.followCaret.toggle()
+                        XCTAssertEqual(panel.frame.height, body + chrome, accuracy: 1, state + " recorded")
+                    }
+                    host.rootView.onResizeEnd(body)
+                    host.layoutSubtreeIfNeeded()
+                    let settledFrame = panel.frame
+                    XCTAssertEqual(settledFrame.height, body + chrome, accuracy: 1, state)
+                    XCTAssertEqual(host.fittingSize.height, body + chrome, accuracy: 1, state)
+                    XCTAssertEqual(host.rootView.textHeightLimit, body)
+                    XCTAssertEqual(panel.frame.minX, x, accuracy: 1)
+                    XCTAssertEqual(panel.frame.maxY, top, accuracy: 1)
+                    XCTAssertEqual(host.rootView.contentPinned, contentPinned)
+                    XCTAssertEqual(host.rootView.serviceStatus != nil, state != "plain")
+                    let button = try control(overlay)
+                    XCTAssertTrue(host.bounds.contains(button.convert(button.bounds, to: host)))
+                    // Native hit testing retains all three chips and the bottom handle;
+                    // the central body remains the existing drag/scroll catcher.
+                    let bottom = NSPoint(x: host.bounds.midX, y: host.isFlipped ? host.bounds.maxY - 8 : 8)
+                    let handle = host.hitTest(host.convert(bottom, to: host.superview))
+                    XCTAssertNotNil(handle); XCTAssertFalse(handle is WindowDragCatcherView)
+                    for inset: CGFloat in contentPinned ? [23, 51, 79] : [23, 51] {
+                        let point = NSPoint(x: host.bounds.maxX - inset, y: host.isFlipped ? 21 : host.bounds.maxY - 21)
+                        let hit = host.hitTest(host.convert(point, to: host.superview))
+                        XCTAssertNotNil(hit); XCTAssertFalse(hit is WindowDragCatcherView)
+                    }
+                    let bodyHit = host.hitTest(host.convert(NSPoint(x: host.bounds.midX, y: host.bounds.midY), to: host.superview))
+                    XCTAssertTrue(bodyHit is WindowDragCatcherView)
+                    print("STATUS_RESIZE", state, "body", body, "chrome", chrome,
+                        "pinned", contentPinned, "settledFrame", settledFrame, "fitting", host.fittingSize)
+                    try save(panel, name: "resize-\(state)-\(contentPinned)-\(Int(body))")
+                }
+            }
+        }
+    }
+
     func testTemporaryAppleHostIsReleasedOnCancellationWithoutTouchingGlobalHolder() async throws {
         let old = SwitchEngine("Old."), gate = SwitchGate()
         let app = makeApp(engines: [.google: old, .local: gate])
