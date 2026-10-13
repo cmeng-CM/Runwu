@@ -193,7 +193,9 @@ enum CaretOffsetMapping {
         guard start <= text.length else { return nil }
         let found = text.range(of: anchor, options: [], range: NSRange(location: start, length: text.length - start))
         guard found.location != NSNotFound else { return nil }
-        let mapped = found.location + anchor.utf16.count
+        // 命中长度取实际命中：`range(of:)` 默认按规范等价匹配，锚与文本的归一化
+        // 形式不同（NFC/NFD）时命中长度不等于锚自身的 UTF-16 长度。
+        let mapped = found.location + found.length
         // 漂移方向单调（AXValue 相对宿主只多不少）：候选落到宿主偏移之前即拒绝。
         guard mapped >= hostOffset else { return nil }
         return mapped

@@ -371,23 +371,27 @@ public struct InputSessionID: Hashable, Sendable {
         let read = reader.text(element)
         guard session == capturedSession, permitsContent(element, app: app) else { return nil }
         guard let text = read ?? ((force || composing) ? "" : nil) else { return nil }
-        guard !geometry.anchorReadFailed else {
-            // 锚窗读取失败（显式错误/预算耗尽/读回空）：宿主偏移不可信，不出卡。
-            invalidateUntrustedSample(geometry, element: element, app: app)
-            return nil
-        }
         var selectedRange = geometry.selectedRange
-        if let hostAnchor = geometry.hostAnchor, let reported = geometry.selectedRange {
-            // Chromium contenteditable（实测 Obsidian）的宿主偏移与 AXValue 两套
-            // 坐标系：映射回 AXValue 的 UTF-16 索引，再用光标后一位字符局部甄别；
-            // 任一不过按不可信采样处理（宁可不翻，不翻错行）。
-            guard let mapped = CaretOffsetMapping.mappedIndex(
-                anchor: hostAnchor, hostOffset: reported.location, in: text as NSString),
-                postCaretCharacterMatches(geometry.postCaretCharacter, at: mapped, in: text as NSString) else {
+        if let read {
+            // 映射只在 `AXValue` 真有值时进行：读不到值（force/组合下的空文本路径）
+            // 沿用旧行为，映射不可用不能吞掉快捷键的 lastGoodText 恢复。
+            guard !geometry.anchorReadFailed else {
+                // 锚窗读取失败（显式错误/预算耗尽/读回空）：宿主偏移不可信，不出卡。
                 invalidateUntrustedSample(geometry, element: element, app: app)
                 return nil
             }
-            selectedRange = NSRange(location: mapped, length: reported.length)
+            if let hostAnchor = geometry.hostAnchor, let reported = geometry.selectedRange {
+                // Chromium contenteditable（实测 Obsidian）的宿主偏移与 AXValue 两套
+                // 坐标系：映射回 AXValue 的 UTF-16 索引，再用光标后一位字符局部甄别；
+                // 任一不过按不可信采样处理（宁可不翻，不翻错行）。
+                guard let mapped = CaretOffsetMapping.mappedIndex(
+                    anchor: hostAnchor, hostOffset: reported.location, in: read as NSString),
+                    postCaretCharacterMatches(geometry.postCaretCharacter, at: mapped, in: read as NSString) else {
+                    invalidateUntrustedSample(geometry, element: element, app: app)
+                    return nil
+                }
+                selectedRange = NSRange(location: mapped, length: reported.length)
+            }
         }
         let snapshot = TextSnapshot(pid: app.pid, bundleIdentifier: app.bundleID, text: text,
             selectedRange: selectedRange, fieldFrame: geometry.anchor.fieldFrame,

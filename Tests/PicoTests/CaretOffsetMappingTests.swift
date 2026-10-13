@@ -137,6 +137,35 @@ final class CaretOffsetMappingTests: XCTestCase {
         XCTAssertEqual(SentenceExtractor().extractSentence(from: midCaptured)?.text, caretLine)
     }
 
+    /// 命中长度取实际命中（`found.length`），不用锚自身的 UTF-16 长度：
+    /// `NSString.range(of:)` 默认按规范等价匹配，锚与文本归一化形式不同时长度会不同。
+    func testCanonicallyEquivalentAnchorUsesFoundLength() throws {
+        // 文本（AXValue 侧）用 NFC 的 é（1 个 UTF-16 单元）；锚窗（宿主侧）用 NFD 的
+        // e + U+0301（2 个单元）：同一段文本两种归一化形式的长度不同。
+        let text = "前缀caf\u{00E9}abcdef尾巴" as NSString
+        let anchor = "cafe\u{0301}abcdef"
+        XCTAssertEqual(anchor.utf16.count, 11, "锚 11 个单元、命中 10 个单元")
+        XCTAssertEqual(("前缀caf\u{00E9}abcdef" as NSString).length, 12)
+        let mapped = try XCTUnwrap(CaretOffsetMapping.mappedIndex(anchor: anchor, hostOffset: 12, in: text))
+        XCTAssertEqual(mapped, 12, "命中起点 2 + 命中长度 10，而不是命中起点 2 + 锚长度 11")
+        XCTAssertEqual(text.substring(with: NSRange(location: mapped, length: 1)), "尾")
+    }
+
+    /// `AXValue` 读不到但锚窗可读：不能因映射失败吞掉快捷键的 `lastGoodText` 恢复
+    /// （force/组合下的空文本路径沿用旧行为）。
+    func testUnreadableValueWithReadableAnchorStillRecoversLastGoodText() throws {
+        let fixture = AXFixture()
+        fixture.hostText = fixture.text
+        fixture.selected = NSRange(location: 8, length: 0)
+        let monitor = fixture.monitor()
+        let sample = try XCTUnwrap(monitor.snapshotNow())
+        XCTAssertEqual(sample.snapshot.text, "我今天会晚一点。")
+        fixture.text = nil
+        let recovered = try XCTUnwrap(monitor.snapshotNow(), "空文本恢复路径不得被映射失败吞掉")
+        XCTAssertEqual(recovered.snapshot.text, "我今天会晚一点。")
+        XCTAssertEqual(recovered.snapshot.selectedRange?.location, ("我今天会晚一点。" as NSString).length)
+    }
+
     /// 原生宿主（宿主文本 == AXValue）：映射等于报告偏移，行为不变。
     func testNativeHostAnchorHitsItsOwnOffset() throws {
         let fixture = AXFixture()
