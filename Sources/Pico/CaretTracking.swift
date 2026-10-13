@@ -43,6 +43,14 @@ struct InputScreenLayout {
     static func finite(_ rect: NSRect) -> Bool {
         [rect.origin.x, rect.origin.y, rect.size.width, rect.size.height].allSatisfy(\.isFinite)
     }
+
+    /// 「像输入框」的高度上限（屏高比例）：超过这个高度的矩形更像整窗/整页
+    /// 容器——祖先兜底跳过它，跟随避让也不把它当障碍（整屏编辑器宿主把整个
+    /// 编辑器报成一个输入框，当障碍会把卡片挤到屏幕边，贴不到光标）。
+    static let fieldHeightLimitFraction: CGFloat = 0.6
+    static func withinFieldHeight(_ rect: NSRect, on screen: NSRect) -> Bool {
+        rect.height <= screen.height * fieldHeightLimitFraction
+    }
 }
 
 @MainActor
@@ -279,7 +287,7 @@ struct AXFieldReader {
             current = candidate
             guard let rect = layout.fieldRect(elementFrame(candidate)),
                 let screen = layout.frames.first(where: { $0.intersects(rect) }),
-                rect.height <= screen.height * 0.6,
+                InputScreenLayout.withinFieldHeight(rect, on: screen),
                 rect.insetBy(dx: -2, dy: 0).contains(NSPoint(x: caretX, y: rect.midY)) else { continue }
             return rect
         }

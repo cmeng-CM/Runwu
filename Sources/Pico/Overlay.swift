@@ -675,10 +675,17 @@ struct OverlayFollowingLayout {
 
     /// 障碍区域：输入框矩形并入光标框。宿主把光标框报在输入框之外时，
     /// 只避输入框仍会把卡片落在输入行上，所以两者取并集；任一矩形不可信
-    /// （非有限值、零高度、不在本屏）就只用余下的那个。两者都不可信时
-    /// 返回 nil，调用方以目标矩形兜底。
+    /// （非有限值、零高度、不在本屏）就只用余下的那个。输入框矩形还要过
+    /// 高度门槛（D-30）：整屏编辑器宿主（Chromium contenteditable，实测
+    /// Obsidian）把整个编辑器报成一个输入框（89% 屏高、贴屏幕上下缘），
+    /// 把它当障碍时上下放不下、左右候选落到焦点窗口外，兜底只剩贴屏幕缘
+    /// ——此时丢弃该矩形，退化为只避光标框（即宿主不报告输入框的路径），
+    /// 卡片贴光标行落下。两者都不可信时返回 nil，调用方以目标矩形兜底。
     static func obstacle(anchor: InputAnchor, screen: NSRect) -> NSRect? {
-        let rects = [anchor.fieldFrame, anchor.caretFrame].compactMap { valid($0, screen: screen) }
+        var rects: [NSRect] = []
+        if let field = valid(anchor.fieldFrame, screen: screen),
+            InputScreenLayout.withinFieldHeight(field, on: screen) { rects.append(field) }
+        if let caret = valid(anchor.caretFrame, screen: screen) { rects.append(caret) }
         guard var region = rects.first else { return nil }
         for rect in rects.dropFirst() { region = region.union(rect) }
         return region
