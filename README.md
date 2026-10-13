@@ -100,6 +100,8 @@ v0.2.0 翻译卡头部显示「润物 · 生成这份译文的服务」。点击
 
 ## 验证与兼容边界
 
+2026-10-13 当前源码全量共 311 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）宿主偏移与 `AXValue` 两套坐标系导致的取句偏上问题：先读宿主锚窗把偏移映射回 `AXValue` 文本再取句，映射配方向守卫（候选不得倒退）与光标后一位字符甄别，校验失败或读取出错时不翻（宁可不翻，不翻错行），宿主不提供该读取能力时沿用报告偏移；新增回归用例 testBlockBoundaryValueMapsToTheCaretLine、testUnmatchableAnchorEmitsNoSnapshot、testCandidateBeforeHostOffsetIsRejected、testPostCaretCharacterMismatchIsRejected、testPostCaretReadUnavailableStillMaps、testNativeHostAnchorHitsItsOwnOffset、testAnchorWindowLengthBoundAtDocumentStart、testUnsupportedAnchorReadKeepsReportedOffset、testFailedAnchorReadEmitsNoSnapshot。
+
 2026-10-13 当前源码全量共 302 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）把整个编辑器报成一个输入框（89% 屏高）时跟随卡贴屏幕顶缘、飘出焦点窗口的问题：高度超过所在屏 0.6 倍的输入框矩形不再作为跟随避让障碍、卡片贴光标行落下，恰为 0.6 倍及以下仍按既有规则避让（由 0.6 门槛边界用例 testFollowingCardKeepsAFieldAtExactlyTheHeightLimit 锁定）；新增回归用例 testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen；≤0.6 屏高输入框行为不变由终审 17 夹具×多高度扫描单测核验，输出与基线逐字一致。
 
 2026-10-12 当前源码全量共 300 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复有道适配器被 code50 拒绝的问题：按当前网页协议先取匿名会话 cookie、补全签名握手与翻译请求字段，cookie 被拒时重取会话并重试一次；新增会话复用、失效重试、重试上限与无 cookie 握手失败四组夹具。release 构建与 `codesign --verify --deep --strict 润物.app` 通过（Runwu Local 身份）。
