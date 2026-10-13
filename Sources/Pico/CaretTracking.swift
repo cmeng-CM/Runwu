@@ -217,10 +217,13 @@ enum CaretOffsetMapping {
     /// 逐字找不到时的归一化兜底（D-07）：`text` 与锚同法去除空白/零宽字符，在归一化
     /// 串里从「归一化后的 s 位置」（`s = max(0, hostOffset - 24)`）起找首个命中，
     /// 命中区间末端经「归一化索引 → 原文索引」表还原为 `AXValue` 的 UTF-16 索引。
+    /// 实义锚尾取最后命中单元后的插入边界，不跨过随后的空白；锚尾为去除字符时
+    /// 沿用下一保留单元/文末哨兵，不推断空白块归属。
     /// 归一化锚不足 8 个非空白单元不匹配（短锚不可辨识，fail-closed）；候选仍须
     /// `mapped >= hostOffset`（方向前提的操作化，不依赖单调性假设）。
     static func mappedIndexIgnoringWhitespace(anchor: String, hostOffset: Int, in text: NSString) -> Int? {
-        let (normalizedAnchor, _) = whitespaceNormalized(anchor as NSString)
+        let anchorText = anchor as NSString
+        let (normalizedAnchor, _) = whitespaceNormalized(anchorText)
         guard normalizedAnchor.length >= minimumAnchorLength else { return nil }
         let (normalizedText, originals) = whitespaceNormalized(text)
         let start = max(0, hostOffset - windowLength)
@@ -231,7 +234,8 @@ enum CaretOffsetMapping {
         guard found.location != NSNotFound else { return nil }
         let hitEnd = found.location + found.length
         guard hitEnd < originals.count else { return nil }
-        let mapped = originals[hitEnd]
+        let mapped = isStripped(anchorText.character(at: anchorText.length - 1))
+            ? originals[hitEnd] : originals[hitEnd - 1] + 1
         guard mapped >= hostOffset else { return nil }
         return mapped
     }
@@ -250,7 +254,7 @@ enum CaretOffsetMapping {
     }
 
     /// 去除空白/零宽字符，返回归一化串与「归一化索引 → 原文索引」表（升序）。
-    /// 表比归一化串长 1：末尾哨兵（原文长度）供「命中区间末端」还原使用。
+    /// 表比归一化串长 1：末尾哨兵（原文长度）供锚尾去除字符的旧边界策略使用。
     static func whitespaceNormalized(_ text: NSString) -> (normalized: NSString, originals: [Int]) {
         var kept: [unichar] = []
         var originals: [Int] = []

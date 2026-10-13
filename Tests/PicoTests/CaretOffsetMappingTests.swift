@@ -228,8 +228,8 @@ final class CaretOffsetMappingTests: XCTestCase {
         fixture.text = first + "\n" + padding + valueBoundary + caretLine
         let caret = ((first + padding + hostBoundary + "第三行光标所") as NSString).length
         fixture.selected = NSRange(location: caret, length: 0)
-        // AXValue 空间里光标后的第一个字符：归一化命中末端（锚的末位实义字符「所」）
-        // 的下一个保留字符——宿主光标后一位「在」在 AXValue 里的索引。
+        // AXValue 空间里光标后的第一个字符：锚的末位实义字符「所」的右边界，
+        // 恰好也是宿主光标后一位「在」在 AXValue 里的索引。
         let mapped = ((first + "\n" + padding + valueBoundary + "第三行光标所") as NSString).length
         let hostAnchor = (fixture.hostText! as NSString).substring(
             with: NSRange(location: caret - CaretOffsetMapping.windowLength,
@@ -244,6 +244,132 @@ final class CaretOffsetMappingTests: XCTestCase {
         XCTAssertEqual(captured.selectedRange?.location, mapped, "selectedRange 是 AXValue 空间的 UTF-16 索引")
         XCTAssertEqual(SentenceExtractor().extractSentence(from: captured)?.text, caretLine,
             "取句必须落在光标所在行")
+    }
+
+    /// 行尾后的连续空行不属于实义结尾的锚窗：还原必须停在最后命中字之后，
+    /// 不能跳到下一段首字，否则监控快照会取成下一段。
+    func testWhitespaceVariantLineEndBeforeBlankLinesMapsToCaretLine() throws {
+        let sample = whitespaceVariantLine(suffix: String(repeating: "\n", count: 6) + "下一段内容")
+        let captured = try captureSnapshot(from: sample.fixture)
+        XCTAssertEqual(captured.selectedRange, NSRange(location: NSMaxRange(sample.valueRange), length: 0),
+            "实义锚尾保留当前行的 UTF-16 插入边界，不跨过六个换行")
+        let sentence = try XCTUnwrap(SentenceExtractor().extractSentence(from: captured))
+        XCTAssertEqual(sentence.text, "第三行光标所在")
+        XCTAssertEqual(sentence.range, sample.valueRange)
+        XCTAssertEqual(sample.fixture.requestedStringRanges.count, 2, "仍只读锚窗和后一位字符")
+    }
+
+    /// 归一化命中位于文末时，下一项是原文长度哨兵；末尾空行仍不能把光标拖到哨兵。
+    func testWhitespaceVariantDocumentEndWithTrailingBlankLinesMapsToCaretLine() throws {
+        let sample = whitespaceVariantLine(suffix: String(repeating: "\n", count: 6))
+        let captured = try captureSnapshot(from: sample.fixture)
+        XCTAssertEqual(captured.selectedRange?.location, NSMaxRange(sample.valueRange))
+        XCTAssertLessThan(try XCTUnwrap(captured.selectedRange).location, captured.text.utf16.count)
+        let sentence = try XCTUnwrap(SentenceExtractor().extractSentence(from: captured),
+            "文末六个空行不能把文字行尾取成空句")
+        XCTAssertEqual(sentence.text, "第三行光标所在")
+        XCTAssertEqual(sentence.range, sample.valueRange)
+    }
+
+    /// 同一份宿主文本从行尾前移一字：映射也只前移一个 UTF-16 单元，取句保持当前行。
+    func testWhitespaceVariantMiddleStillMapsToCaretLine() throws {
+        let sample = whitespaceVariantLine(suffix: String(repeating: "\n", count: 6) + "下一段内容")
+        let fixture = sample.fixture, monitor = fixture.monitor()
+        var snapshots: [TextSnapshot] = []
+        monitor.onSnapshot = { value, _, _ in snapshots.append(value) }
+        monitor.readSnapshot()
+        fixture.selected.location -= 1
+        monitor.readSnapshot()
+        XCTAssertEqual(snapshots.count, 2)
+        let atEnd = try XCTUnwrap(snapshots.first), beforeEnd = try XCTUnwrap(snapshots.last)
+        XCTAssertEqual(atEnd.selectedRange?.location, NSMaxRange(sample.valueRange))
+        XCTAssertEqual(beforeEnd.selectedRange?.location, NSMaxRange(sample.valueRange) - 1)
+        XCTAssertEqual(try XCTUnwrap(atEnd.selectedRange).location - XCTUnwrap(beforeEnd.selectedRange).location, 1)
+        for snapshot in snapshots {
+            XCTAssertEqual(SentenceExtractor().extractSentence(from: snapshot)?.text, "第三行光标所在")
+        }
+    }
+
+    /// 最后命中单元可能是 emoji 的低代理项或组合附加符；+1 必须还原整个字素之后。
+    func testWhitespaceVariantUnicodeLineEndMapsToUTF16Boundary() throws {
+        for ending in ["😀", "👩🏽‍💻", "e\u{0301}"] {
+            let caretLine = "第三行光标所在" + ending
+            let sample = whitespaceVariantLine(caretLine: caretLine,
+                suffix: String(repeating: "\n", count: 6) + "下一段内容")
+            let captured = try captureSnapshot(from: sample.fixture)
+            let mapped = try XCTUnwrap(captured.selectedRange).location
+            XCTAssertEqual(mapped, NSMaxRange(sample.valueRange), ending)
+            XCTAssertEqual((captured.text as NSString).character(at: mapped), 0x000A)
+            let sentence = try XCTUnwrap(SentenceExtractor().extractSentence(from: captured))
+            XCTAssertEqual(sentence.text, caretLine)
+            XCTAssertEqual(sentence.range, sample.valueRange, "取句范围包含完整 emoji/组合字符")
+        }
+    }
+
+    /// 文末没有尾随空白时，最后实义单元的右边界与原文长度哨兵相等。
+    func testWhitespaceVariantDocumentEndWithoutTrailingBlankLinesUsesSentinel() throws {
+        let sample = whitespaceVariantLine(suffix: "")
+        let captured = try captureSnapshot(from: sample.fixture)
+        XCTAssertEqual(captured.selectedRange?.location, captured.text.utf16.count)
+        XCTAssertEqual(captured.selectedRange?.location, NSMaxRange(sample.valueRange))
+        XCTAssertEqual(SentenceExtractor().extractSentence(from: captured)?.text, "第三行光标所在")
+        let (_, originals) = CaretOffsetMapping.whitespaceNormalized(captured.text as NSString)
+        XCTAssertEqual(originals.last, captured.text.utf16.count)
+    }
+
+    /// 锚尾本身是去除字符时仍使用下一保留字符/文末哨兵，不推断空白块归属。
+    func testWhitespaceVariantTrailingAnchorWhitespaceKeepsExistingBoundary() throws {
+        for trailing in [" ", "\t", "\n", "\u{200B}", "\u{FEFF}"] {
+            for following in ["下一段内容", ""] {
+                let blankLines = String(repeating: "\n", count: 6)
+                let sample = whitespaceVariantLine(caretLine: "第三行光标所在" + trailing,
+                    suffix: blankLines + following)
+                let captured = try captureSnapshot(from: sample.fixture)
+                let expected = NSMaxRange(sample.valueRange) + blankLines.utf16.count
+                XCTAssertEqual(captured.selectedRange?.location, expected,
+                    "锚尾 \(trailing.debugDescription) 沿用下一保留字符或哨兵")
+            }
+        }
+    }
+
+    /// 修正后的实义结尾在报告偏移之前时仍拒绝；不能借后面的空白或第二个命中绕过守卫。
+    func testWhitespaceVariantContentEndRejectsCandidateBeforeHostOffset() {
+        let fixture = AXFixture()
+        fixture.hostText = "a b c d e f g h"
+        fixture.text = "abcdefgh" + String(repeating: "\n", count: 12) + "abcdefgh"
+        fixture.selected = NSRange(location: 16, length: 0)
+        XCTAssertNil(CaretOffsetMapping.mappedIndex(anchor: fixture.hostText!, hostOffset: 16,
+            in: fixture.text! as NSString), "首个命中的正确边界 8 < 16，即使后面还有命中也拒绝")
+        let monitor = fixture.monitor()
+        var snapshots = 0, anchors = 0
+        monitor.onSnapshot = { _, _, _ in snapshots += 1 }
+        monitor.onAnchorChanged = { _, _ in anchors += 1 }
+        monitor.readSnapshot()
+        XCTAssertEqual(snapshots, 0)
+        XCTAssertGreaterThan(anchors, 0, "映射失败仍发布几何")
+        XCTAssertEqual(fixture.requestedStringRanges.count, 2, "拒绝不增加 AX 查询")
+    }
+
+    /// 用相同块边界差异强制走归一化；期待范围从 AXValue 前缀独立计算。
+    private func whitespaceVariantLine(caretLine: String = "第三行光标所在", suffix: String)
+        -> (fixture: AXFixture, valueRange: NSRange) {
+        let first = "第一行内容。\n"
+        let padding = String(repeating: "垫片行内容需要足够长。\n", count: 3)
+        let hostPrefix = first + padding + "\u{200B}\t"
+        let valuePrefix = first + "\n" + padding + "\n\u{200B}\n"
+        let fixture = AXFixture()
+        fixture.hostText = hostPrefix + caretLine + suffix
+        fixture.text = valuePrefix + caretLine + suffix
+        fixture.selected = NSRange(location: (hostPrefix + caretLine).utf16.count, length: 0)
+        return (fixture, NSRange(location: valuePrefix.utf16.count, length: caretLine.utf16.count))
+    }
+
+    private func captureSnapshot(from fixture: AXFixture) throws -> TextSnapshot {
+        let monitor = fixture.monitor()
+        var snapshot: TextSnapshot?
+        monitor.onSnapshot = { value, _, _ in snapshot = value }
+        monitor.readSnapshot()
+        return try XCTUnwrap(snapshot, "可映射的空白形态差异应发出快照")
     }
 
     /// 归一化后锚不足 8 个非空白单元（形态几乎全是零宽/制表标记）→ 不做归一化匹配，
