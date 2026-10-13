@@ -38,8 +38,8 @@ final class OverlayFieldAvoidanceTests: XCTestCase {
     /// (0,0,1920,1080)：x 减 1512、y 加 63；决策 D-30）：Chromium
     /// contenteditable 宿主把整个编辑器报成输入框（799×961，89% 屏高），
     /// 整块当障碍时上下放不下、左右候选落到焦点窗口外的其它窗口上，兜底
-    /// 反而贴到屏幕顶缘。高度 ≥ 0.6 屏高的矩形不再当障碍后，宽/窄两种卡
-    /// 都应贴光标行上方（maxY == caret.minY - gap）落下。
+    /// 反而贴到屏幕顶缘。高度超过 0.6 倍屏高的矩形不再当障碍后，宽/窄两种
+    /// 卡都应贴光标行下方（光标行下缘 + gap）落下。
     func testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen() throws {
         let display = NSRect(x: 0, y: 0, width: 1920, height: 1080)
         let field = NSRect(x: 515, y: 0, width: 799, height: 961)
@@ -47,9 +47,31 @@ final class OverlayFieldAvoidanceTests: XCTestCase {
         for size in [NSSize(width: 600, height: 135), NSSize(width: 340, height: 114)] {
             let frame = try XCTUnwrap(OverlayFollowingLayout.frame(size: size,
                 anchor: InputAnchor(caretFrame: caret, fieldFrame: field), screens: [display]))
-            XCTAssertEqual(frame.maxY, caret.minY - OverlayPlacement.gap, "卡片应贴光标行上方（卡 \(size)）")
+            XCTAssertEqual(frame.maxY, caret.minY - OverlayPlacement.gap,
+                "卡片应贴光标行下方（光标行下缘 + gap，卡 \(size)）")
             XCTAssertFalse(frame.intersects(caret), "卡片不得压住光标（卡 \(size)）")
             XCTAssertTrue(display.contains(frame), "卡片应整张落在屏内（卡 \(size)）")
+        }
+    }
+
+    /// D-30 门槛的边界锁定：同一屏上，field 高度恰为 0.6 屏高（1080 × 0.6 =
+    /// 648）时仍作为避让障碍，卡片让开该矩形（上挂/下挂皆算让开）；高度略超
+    /// （+1 点）时不再当障碍，卡片贴光标行下方（光标行下缘 + gap），可落回
+    /// field 矩形内。
+    func testFollowingCardKeepsAFieldAtExactlyTheHeightLimit() throws {
+        let display = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let caret = NSRect(x: 552, y: 300, width: 1, height: 22)
+        let atLimit = NSRect(x: 515, y: 108, width: 799, height: 648)
+        let overLimit = NSRect(x: 515, y: 108, width: 799, height: 649)
+        for size in [NSSize(width: 600, height: 135), NSSize(width: 340, height: 114)] {
+            let kept = try XCTUnwrap(OverlayFollowingLayout.frame(size: size,
+                anchor: InputAnchor(caretFrame: caret, fieldFrame: atLimit), screens: [display]))
+            XCTAssertFalse(kept.intersects(atLimit), "恰为 0.6 倍屏高仍是障碍，卡片应让开（卡 \(size)）")
+            let dropped = try XCTUnwrap(OverlayFollowingLayout.frame(size: size,
+                anchor: InputAnchor(caretFrame: caret, fieldFrame: overLimit), screens: [display]))
+            XCTAssertEqual(dropped.maxY, caret.minY - OverlayPlacement.gap,
+                "略超 0.6 倍屏高不再当障碍，卡片应贴光标行下方（卡 \(size)）")
+            XCTAssertTrue(overLimit.contains(dropped), "卡片应落回 field 矩形内（卡 \(size)）")
         }
     }
 
@@ -70,8 +92,8 @@ final class OverlayFieldAvoidanceTests: XCTestCase {
     }
 
     /// 高度未到整屏级（≤0.6 屏高）的输入框仍是避让障碍；上下都放不下整张
-    /// 卡时，贴着光标行从侧面绕开。（高度 ≥0.6 屏高的屏幕级矩形已按 D-30
-    /// 不再当障碍，由 testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen
+    /// 卡时，贴着光标行从侧面绕开。（高度超过 0.6 倍屏高的屏幕级矩形已按
+    /// D-30 不再当障碍，由 testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen
     /// 覆盖。）
     func testFollowingCardSlidesBesideAFieldThatBlocksBothSides() throws {
         let field = NSRect(x: 400, y: 100, width: 500, height: 500)
