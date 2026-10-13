@@ -37,7 +37,7 @@
 
 - `Sources/Pico/Input.swift` 补充快照组合状态、UTF-16 长度、报告/最终选区，防抖排队/到期/真实取消，取句为空/语言不匹配/句子去重，以及采样失效/恢复和会话重置事件。
 - `Sources/Pico/Diagnostics.swift` 增加封闭的 `InputDiagnosticReason` 与元数据格式器；继续使用原 `DiagnosticLog` 内存环、文件开关、上限与 0600 权限。
-- 新增 `InputPipelineDiagnosticTests` 7 项，`CaretTrackingTests` 新增 3 项并补充既有重入回归断言：通过真实 monitor → coordinator → debounce 路径验证组合取消、未知组合取消、恢复后再失败、到期空取句与去重；检查正文/锚窗/标签/密钥/译文哨兵不进入内存环、文件和导出报告。
+- 新增 `InputPipelineDiagnosticTests` 9 项，`CaretTrackingTests` 新增 3 项并补充既有重入回归断言：通过真实 monitor → coordinator → debounce 路径验证组合取消、未知组合取消、恢复后再失败、到期空取句与去重；检查正文/锚窗/标签/密钥/译文哨兵不进入内存环、文件和导出报告；另用真实 AXValue 读取回调区分读取后的资格失败和重入会话失效，并验证会话失效仍短路后续资格查询。
 - README 补充诊断事件的阅读方法。未改变采样间隔、防抖默认值、AX 调用与预算、功能 guard 的求值顺序、回调、快照或布局语义。
 - 全量 `swift test` 327 项、0 失败、1 项既有联网测试跳过；独立任务审查双 PASS，47 项相关测试复跑通过。
 - 2026-10-13 14:27 已使用既有 Runwu Local 身份构建并安装到 `/Applications/润物.app`，严格签名验证通过，指定要求与旧安装一致，构建/安装可执行文件 SHA-256 一致；后台重启后的启动日志确认 `trusted=true enabled=true`，调试开关仍为 `1`。安装证据保存于 `.workflow/obsidian-input-diagnostics/reports/build-install.md`。
@@ -90,3 +90,5 @@
 所有新增选区与长度均用 UTF-16 单元；缺失数字记 `-1`。旧 `debounce fired` 保留，其 `sentenceLength` 仍是 Swift 字符数。标识沿用既有 bundle 与 session UUID；不序列化原句 key、正文、锚窗、后一位字符或错误描述。
 
 固定采样原因包含 `application_changed`、`application_unavailable`、`focus_changed`、`focus_unavailable`、`geometry_unavailable`、`composition_unreadable`、`anchor_read_failed`、`mapping_not_found`、`post_caret_mismatch`、`content_unreadable`、`content_qualification_failed`、`session_changed`、`composing`、`shortcut_recovery_empty`。协调器/防抖原因包含 `composing`、`empty_text`、`timing_changed`、`complete_sentence`、`shortcut`、`reset`、`source_language_changed`、`excluded_app`、`snapshot_replaced`、`disabled`；取句结果另记 `extraction_empty`、`source_language_mismatch`、`sentence_deduplicated`。
+
+读取正文后的原因按实际失败条件记录：先比较既有会话，失败才记 `session_changed`，并短路后续资格查询；同会话下的 `permitsContent` 失败记 `content_qualification_failed`，即使它在拒绝时内部旋转了会话，也不改写为会话失效。两项检查的顺序与查询次数保持原值。

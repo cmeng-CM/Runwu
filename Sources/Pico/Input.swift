@@ -493,8 +493,13 @@ public struct InputSessionID: Hashable, Sendable {
         guard permitsContent(element, app: app) else { diagnosticCaptureFailure = .contentQualificationFailed; return nil }
         if force, composing { diagnosticCaptureFailure = .composing; return nil }
         let read = reader.text(element)
-        guard session == capturedSession, permitsContent(element, app: app) else {
-            diagnosticCaptureFailure = session == capturedSession ? .contentQualificationFailed : .sessionChanged
+        guard session == capturedSession else {
+            diagnosticCaptureFailure = .sessionChanged
+            return nil
+        }
+        // Qualification rejection can rotate the session; keep its own cause.
+        guard permitsContent(element, app: app) else {
+            diagnosticCaptureFailure = .contentQualificationFailed
             return nil
         }
         guard let text = read ?? ((force || composing) ? "" : nil) else {

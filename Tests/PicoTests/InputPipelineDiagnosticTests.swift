@@ -213,6 +213,78 @@ final class InputPipelineDiagnosticTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
+    func testPostReadQualificationFailureKeepsItsCauseAfterSessionRotation() async throws {
+        let boundary = beginLogCapture(), fixture = AXFixture(), input = InputCoordinator()
+        var access = fixture.access(), rejectAfterRead = false
+        let originalRead = access.readAttribute
+        access.readAttribute = { element, key in
+            let result = originalRead(element, key)
+            if rejectAfterRead, key == kAXValueAttribute as String {
+                fixture.secureElement = fixture.first
+            }
+            return result
+        }
+        let monitor = AccessibilityMonitor(access: access, currentApplication: {
+            MonitoredApplication(pid: fixture.pid, bundleID: fixture.bundleID)
+        }, screenFrames: { fixture.screens })
+        input.delayMilliseconds = 20
+        defer { input.reset() }
+        monitor.onFocusChanged = { input.reset() }
+        var snapshots = 0, emitted = 0
+        monitor.onSnapshot = { snapshot, session, screen in
+            snapshots += 1
+            input.handle(snapshot, session: session, screen: screen)
+        }
+        input.onSentence = { _, _, _, _, _ in emitted += 1 }
+        monitor.readSnapshot()
+        let contentReads = fixture.contentReads
+        rejectAfterRead = true
+        monitor.readSnapshot()
+        try await Task.sleep(for: .milliseconds(70))
+        XCTAssertEqual(fixture.contentReads, contentReads + 1, "Qualification changes only after the actual AXValue read")
+        XCTAssertEqual(snapshots, 1, "The newly protected sample must still be rejected")
+        XCTAssertEqual(emitted, 0, "Qualification failure must retain the existing pending cancellation behavior")
+        let log = capturedLines(after: boundary)
+        XCTAssertEqual(count("input sample blocked reason=content_qualification_failed", in: log), 1)
+        XCTAssertEqual(count("input session reset reason=content_qualification_failed", in: log), 1)
+        XCTAssertEqual(count("input sample blocked reason=session_changed", in: log), 0,
+            "A session rotation inside permitsContent must not relabel its qualification failure")
+        XCTAssertEqual(count("debounce cancelled reason=reset", in: log), 1)
+    }
+
+    func testPostReadReentrantSessionChangeShortCircuitsQualification() throws {
+        let boundary = beginLogCapture(), fixture = AXFixture()
+        var access = fixture.access(), stopDuringRead = false
+        weak var activeMonitor: AccessibilityMonitor?
+        var attributeReadsAtStop: Int?
+        let originalRead = access.readAttribute
+        access.readAttribute = { element, key in
+            let result = originalRead(element, key)
+            if stopDuringRead, key == kAXValueAttribute as String {
+                activeMonitor?.stop()
+                attributeReadsAtStop = fixture.attributeReads
+            }
+            return result
+        }
+        let monitor = AccessibilityMonitor(access: access, currentApplication: {
+            MonitoredApplication(pid: fixture.pid, bundleID: fixture.bundleID)
+        }, screenFrames: { fixture.screens })
+        activeMonitor = monitor
+        var snapshots = 0
+        monitor.onSnapshot = { _, _, _ in snapshots += 1 }
+        monitor.readSnapshot()
+        let contentReads = fixture.contentReads
+        stopDuringRead = true
+        monitor.readSnapshot()
+        XCTAssertEqual(fixture.contentReads, contentReads + 1)
+        XCTAssertEqual(snapshots, 1, "A session invalidated reentrantly during the read must not emit")
+        XCTAssertEqual(fixture.attributeReads, try XCTUnwrap(attributeReadsAtStop),
+            "The failed session check must short circuit the post-read qualification calls")
+        let log = capturedLines(after: boundary)
+        XCTAssertEqual(count("input sample blocked reason=session_changed", in: log), 1)
+        XCTAssertEqual(count("input sample blocked reason=content_qualification_failed", in: log), 0)
+    }
+
     private func connect(_ monitor: AccessibilityMonitor, to input: InputCoordinator) {
         monitor.onFocusChanged = { input.reset() }
         monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
