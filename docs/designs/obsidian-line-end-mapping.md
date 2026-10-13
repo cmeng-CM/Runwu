@@ -40,7 +40,9 @@
 
 无代码范围或实现规则偏离。T2 已按源码提交 `6360604b8eba91dd2c291502efc5bf6637d2b1cf` 完成 Release 构建和安装至 `/Applications/润物.app`：构建退出 0，构建及安装包的 `codesign --verify --deep --strict` 均退出 0，新旧指定要求与原 Runwu Local 证书一致。替换前已备份旧应用至 `.build/obsidian-line-end-mapping/previous-installed-20261013T113443Z.app`。构建与安装二进制的 SHA256 均为 `f34574a1362b2a09145ee88f16ede7e5c4120f7e7c89e5716f2fe081cc48b2b1`。
 
-安装核验记录（2026-10-13 19:39）显示新进程 PID `58638`，`debugLogEnabled` 保持 `1`；首次后台启动核验在 10 秒内没有取得启动日志，退出 1。只读进程采样显示主线程停于既有的 `SettingsStore.restoreAPIKeysFromKeychain → KeychainStore.string → SecItemCopyMatching → SecurityServer.decrypt` 路径，状态为 `waiting_keychain_before_startup`。尚未取得 `trusted=true` 启动证据，T2 运行验证未完成；已请求用户解锁并手动处理可能的系统钥匙串提示，未自动操作钥匙串、权限或用户窗口。Obsidian 真机复验仍由用户完成。
+首次安装核验记录（2026-10-13 19:39）显示新进程 PID `58638`，`debugLogEnabled` 保持 `1`；后台启动核验在 10 秒内没有取得启动日志，退出 1。只读进程采样显示主线程停于既有的 `SettingsStore.restoreAPIKeysFromKeychain → KeychainStore.string → SecItemCopyMatching → SecurityServer.decrypt` 路径，当时状态为 `waiting_keychain_before_startup`。当时尚无 `trusted=true` 启动证据，已请求用户解锁并手动处理可能的系统钥匙串提示，未自动操作钥匙串、权限或用户窗口。
+
+用户明确回复已处理后，2026-10-13 20:04 最终核验取得 `2026-10-13T12:02:49.878Z startup trusted=true enabled=true` 和 `2026-10-13T12:02:49.909Z accessibility monitor started` 日志；PID `58638` 仍运行，`debugLogEnabled` 仍为 `1`。构建/安装 SHA256、严格签名和原指定要求再次核对通过，状态更新为 `trusted_startup_and_monitor_confirmed`，T2 运行核验通过，无需再次安装或重启。初次钥匙串等待记录保留；Obsidian 真机输入和浮窗显示仍待用户复验。
 
 ## 已知限制
 
