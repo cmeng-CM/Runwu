@@ -39,8 +39,8 @@
 - `Sources/Pico/Diagnostics.swift` 增加封闭的 `InputDiagnosticReason` 与元数据格式器；继续使用原 `DiagnosticLog` 内存环、文件开关、上限与 0600 权限。
 - 新增 `InputPipelineDiagnosticTests` 9 项，`CaretTrackingTests` 新增 3 项并补充既有重入回归断言：通过真实 monitor → coordinator → debounce 路径验证组合取消、未知组合取消、恢复后再失败、到期空取句与去重；检查正文/锚窗/标签/密钥/译文哨兵不进入内存环、文件和导出报告；另用真实 AXValue 读取回调区分读取后的资格失败和重入会话失效，并验证会话失效仍短路后续资格查询。
 - README 补充诊断事件的阅读方法。未改变采样间隔、防抖默认值、AX 调用与预算、功能 guard 的求值顺序、回调、快照或布局语义。
-- 全量 `swift test` 327 项、0 失败、1 项既有联网测试跳过；独立任务审查双 PASS，47 项相关测试复跑通过。
-- 2026-10-13 14:27 已使用既有 Runwu Local 身份构建并安装到 `/Applications/润物.app`，严格签名验证通过，指定要求与旧安装一致，构建/安装可执行文件 SHA-256 一致；后台重启后的启动日志确认 `trusted=true enabled=true`，调试开关仍为 `1`。安装证据保存于 `.workflow/obsidian-input-diagnostics/reports/build-install.md`。
+- 最终源码全量 `swift test` 329 项、0 失败、1 项既有联网测试跳过；独立任务审查双 PASS。终审指出的读取后资格失败归因问题已修正，原检查顺序和短路保持；两项真实读取回调回归加入后，49 项相关测试通过，终审聚焦核对 PASS。
+- 2026-10-13 14:47 已使用既有 Runwu Local 身份重建最终源码 `ffeb531` 并安装到 `/Applications/润物.app`，严格签名验证通过，指定要求与旧安装一致，构建/安装可执行文件 SHA-256 一致；后台重启后的启动日志确认 `trusted=true enabled=true`，调试开关仍为 `1`。安装证据保存于 `.workflow/obsidian-input-diagnostics/reports/build-install.md`。
 - 用户真机复现尚未完成，旧 caret-offset-mapping T5 仍未执行。没有据此宣告真机故障修复。
 
 ## 已知限制
