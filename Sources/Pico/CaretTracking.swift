@@ -180,25 +180,83 @@ struct AXFieldAccess {
 /// 自身文本计数，而 `AXValue` 在每个块边界多出换行并保留标记字符——两套坐标系。
 /// 直接按偏移索引 `AXValue` 会把当前句取到光标上方。这里用宿主锚窗做内容锚定，
 /// 把偏移换回 `AXValue` 的 UTF-16 索引；找不到或候选倒退（违反漂移方向）返回 nil，
-/// 由调用方按不可信采样处理（不出卡）。全部单位是 UTF-16 单元。
+/// 由调用方按不可信采样处理（不出卡）。两套坐标系对空白与零宽标记的表示法不同
+/// （实测宿主 `ZWSP+\t` ↔ `AXValue` 换行），逐字锚在真实宿主里经常找不到，故逐字
+/// 失败后按去空白归一化再做一次定位（D-07，实义字符不放宽）。全部单位是 UTF-16 单元。
 enum CaretOffsetMapping {
     /// 锚窗长度：足以在重复行常见的文档里定位，又不依赖宿主内部改写规则。
     static let windowLength = 24
     /// 少于 8 个 UTF-16 单元无法辨识（短句重复多），不做映射。
     static let minimumAnchorLength = 8
+    /// 归一化去除的字符：系统空白/换行（空格、制表、换行等）加两种零宽字符
+    /// （ZWSP U+200B、ZWNBSP/BOM U+FEFF）——实测宿主用它们表示块边界。
+    static let strippedCharacters: CharacterSet = {
+        var set = CharacterSet.whitespacesAndNewlines
+        set.insert(charactersIn: "\u{200B}\u{FEFF}")
+        return set
+    }()
 
+    /// 两段式定位：先逐字匹配（原行为）；逐字找不到时容忍空白/标记的形态差异，
+    /// 走 `mappedIndexIgnoringWhitespace`。方向守卫（`mapped >= hostOffset`）不变。
     static func mappedIndex(anchor: String, hostOffset: Int, in text: NSString) -> Int? {
         guard hostOffset >= minimumAnchorLength, anchor.utf16.count >= minimumAnchorLength else { return nil }
         let start = max(0, hostOffset - windowLength)
         guard start <= text.length else { return nil }
         let found = text.range(of: anchor, options: [], range: NSRange(location: start, length: text.length - start))
-        guard found.location != NSNotFound else { return nil }
+        guard found.location != NSNotFound else {
+            return mappedIndexIgnoringWhitespace(anchor: anchor, hostOffset: hostOffset, in: text)
+        }
         // 命中长度取实际命中：`range(of:)` 默认按规范等价匹配，锚与文本的归一化
         // 形式不同（NFC/NFD）时命中长度不等于锚自身的 UTF-16 长度。
         let mapped = found.location + found.length
         // 漂移方向单调（AXValue 相对宿主只多不少）：候选落到宿主偏移之前即拒绝。
         guard mapped >= hostOffset else { return nil }
         return mapped
+    }
+
+    /// 逐字找不到时的归一化兜底（D-07）：`text` 与锚同法去除空白/零宽字符，在归一化
+    /// 串里从「归一化后的 s 位置」（`s = max(0, hostOffset - 24)`）起找首个命中，
+    /// 命中区间末端经「归一化索引 → 原文索引」表还原为 `AXValue` 的 UTF-16 索引。
+    /// 归一化锚不足 8 个非空白单元不匹配（短锚不可辨识，fail-closed）；候选仍须
+    /// `mapped >= hostOffset`（方向前提的操作化，不依赖单调性假设）。
+    static func mappedIndexIgnoringWhitespace(anchor: String, hostOffset: Int, in text: NSString) -> Int? {
+        let (normalizedAnchor, _) = whitespaceNormalized(anchor as NSString)
+        guard normalizedAnchor.length >= minimumAnchorLength else { return nil }
+        let (normalizedText, originals) = whitespaceNormalized(text)
+        let start = max(0, hostOffset - windowLength)
+        guard start <= text.length, let normalizedStart = originals.firstIndex(where: { $0 >= start }),
+            normalizedStart <= normalizedText.length else { return nil }
+        let found = normalizedText.range(of: normalizedAnchor as String, options: [],
+            range: NSRange(location: normalizedStart, length: normalizedText.length - normalizedStart))
+        guard found.location != NSNotFound else { return nil }
+        let hitEnd = found.location + found.length
+        guard hitEnd < originals.count else { return nil }
+        let mapped = originals[hitEnd]
+        guard mapped >= hostOffset else { return nil }
+        return mapped
+    }
+
+    /// 单个 UTF-16 单元是否属于归一化去除集合（空白/零宽标记）。
+    static func isStripped(_ unit: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(unit) else { return false }
+        return strippedCharacters.contains(scalar)
+    }
+
+    /// 去除空白/零宽字符，返回归一化串与「归一化索引 → 原文索引」表（升序）。
+    /// 表比归一化串长 1：末尾哨兵（原文长度）供「命中区间末端」还原使用。
+    static func whitespaceNormalized(_ text: NSString) -> (normalized: NSString, originals: [Int]) {
+        var kept: [unichar] = []
+        var originals: [Int] = []
+        kept.reserveCapacity(text.length)
+        originals.reserveCapacity(text.length + 1)
+        for index in 0..<text.length {
+            let unit = text.character(at: index)
+            if isStripped(unit) { continue }
+            kept.append(unit)
+            originals.append(index)
+        }
+        originals.append(text.length)
+        return (NSString(characters: kept, length: kept.count), originals)
     }
 }
 
@@ -213,7 +271,9 @@ struct AXFieldReader {
         /// 宿主在 `[r - 24, r)` 的文本（Chromium contenteditable 的两套坐标系，
         /// 见 `CaretOffsetMapping`）。nil 表示宿主不提供该读取或短锚（沿用报告偏移）。
         let hostAnchor: String?
-        /// 宿主在光标后一位的字符：映射后的局部甄别材料（读不到时为 nil）。
+        /// 宿主在光标后一位的字符：映射后的局部甄别材料。读不到、或读到的字符属于
+        /// 归一化去除集合（空白/零宽形态，见 `CaretOffsetMapping.strippedCharacters`）
+        /// 时为 nil——不可比即跳过甄别（D-07）。
         let postCaretCharacter: String?
         /// 锚窗读取失败（显式错误/预算耗尽/读回空）：宿主偏移不可信，不出卡。
         let anchorReadFailed: Bool
@@ -363,12 +423,15 @@ struct AXFieldReader {
     }
 
     /// 光标后一位字符（局部甄别用）。读不到（越界/不支持/错误）就当不可比，
-    /// 不因此关闭采样——D-06 只在可读时要求与 `AXValue[mapped]` 一致。
+    /// 不因此关闭采样——D-06 只在可读时要求与 `AXValue[mapped]` 一致；读到的
+    /// 字符是空白/零宽形态（实测宿主用 `ZWSP+\t` 表示块边界）同样不可比：
+    /// 两套坐标系对空白的表示法不同，形态差异不构成「不一致」的证据（D-07）。
     private func postCaretCharacter(_ element: AXUIElement, caret: Int) -> String? {
         guard let parameter = rangeValue(NSRange(location: caret, length: 1)),
             case .value(let raw) = access.parameterizedResult(
                 element, kAXStringForRangeParameterizedAttribute as String, parameter),
-            let value = raw as? String, value.utf16.count == 1 else { return nil }
+            let value = raw as? String, value.utf16.count == 1,
+            let unit = value.utf16.first, !CaretOffsetMapping.isStripped(unit) else { return nil }
         return value
     }
 
