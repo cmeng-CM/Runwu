@@ -46,7 +46,7 @@ DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建�
 
 ## 输入、位置与显式操作
 
-在「翻译」设置选择源语言、目标语言和服务。默认中文 → 英文，约 450ms 停顿后翻译当前句子，也可选择完整句子或快捷键触发；快捷键可在设置中录制，以当前配置为准。输入后查看浮窗的原文与译文，中文输入法候选尚未上屏时等待提交。输入框、应用或当前句子改变后，旧请求不能覆盖新句子。重复句子按实际 UTF-16 范围区分，包含 emoji 的文本也按真实范围处理。Chromium 系文档编辑器（实测 Obsidian）把宿主偏移与 `AXValue` 文本报成两套坐标系，润物先读宿主锚窗、把偏移映射回文本后再取句；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；这类宿主上「替换原文」在偏移映射生效时只会按映射后的正确范围替换，或按既有门槛被拒绝，不会再替换错行；映射未发生时（宿主不提供该读取或不足 8 个 UTF-16 单元）仍可能按报告偏移错行替换。
+在「翻译」设置选择源语言、目标语言和服务。默认中文 → 英文，约 450ms 停顿后翻译当前句子，也可选择完整句子或快捷键触发；快捷键可在设置中录制，以当前配置为准。输入后查看浮窗的原文与译文，中文输入法候选尚未上屏时等待提交。输入框、应用或当前句子改变后，旧请求不能覆盖新句子。重复句子按实际 UTF-16 范围区分，包含 emoji 的文本也按真实范围处理。Chromium 系文档编辑器（实测 Obsidian）把宿主偏移与 `AXValue` 文本报成两套坐标系，润物先读宿主锚窗、把偏移映射回文本后再取句（锚窗匹配对空白形态——零宽空格/制表符/换行——容忍：逐字找不到时按去空白归一化匹配并还原原文索引，甄别遇空白跳过）；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；这类宿主上「替换原文」在偏移映射生效时只会按映射后的正确范围替换，或按既有门槛被拒绝，不会再替换错行；映射未发生时（宿主不提供该读取或不足 8 个 UTF-16 单元）仍可能按报告偏移错行替换。
 
 v0.2.0 会在读取正文前检查焦点和编辑资格：明确只读、禁用的控件及未聚焦的列表文本不会触发输入翻译，Finder 式目录列表的合成回归已通过；搜索、重命名等真正的输入框仍保留支持。原焦点的标准原生文本控件未提供可选编辑元数据时保持既有兼容，因此不能保证识别所有未标明只读的宿主。尚未访问真实 Finder 输入树或实机点击验证，遇到不兼容应用可使用排除设置或剪贴板翻译。当前句仍按光标位置和原有标点规则提取，不新增“必须键入才翻译”的限制。
 
@@ -100,7 +100,7 @@ v0.2.0 翻译卡头部显示「润物 · 生成这份译文的服务」。点击
 
 ## 验证与兼容边界
 
-2026-10-13 当前源码全量共 313 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）宿主偏移与 `AXValue` 两套坐标系导致的取句偏上问题：先读宿主锚窗把偏移映射回 `AXValue` 文本再取句，映射配方向守卫（候选不得倒退）与光标后一位字符甄别，校验失败或读取出错时不翻（宁可不翻，不翻错行），宿主不提供该读取能力时沿用报告偏移；新增回归用例 testBlockBoundaryValueMapsToTheCaretLine、testUnmatchableAnchorEmitsNoSnapshot、testCandidateBeforeHostOffsetIsRejected、testPostCaretCharacterMismatchIsRejected、testPostCaretReadUnavailableStillMaps、testNativeHostAnchorHitsItsOwnOffset、testAnchorWindowLengthBoundAtDocumentStart、testUnsupportedAnchorReadKeepsReportedOffset、testFailedAnchorReadEmitsNoSnapshot、testCanonicallyEquivalentAnchorUsesFoundLength、testUnreadableValueWithReadableAnchorStillRecoversLastGoodText。
+2026-10-13 当前源码全量共 317 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）宿主偏移与 `AXValue` 两套坐标系导致的取句偏上问题：先读宿主锚窗把偏移映射回 `AXValue` 文本再取句，映射配方向守卫（候选不得倒退）与光标后一位字符甄别，校验失败或读取出错时不翻（宁可不翻，不翻错行），宿主不提供该读取能力时沿用报告偏移；首版在真实宿主因空白表示法差异常不出卡（宿主用零宽空格+制表符表示块边界、`AXValue` 用换行，逐字锚窗找不到即不翻），已改为对空白形态容忍的映射——逐字失败时按去空白归一化匹配并还原原文索引（归一化锚不足 8 个非空白单元仍不匹配），甄别遇空白跳过；新增回归用例 testBlockBoundaryValueMapsToTheCaretLine、testUnmatchableAnchorEmitsNoSnapshot、testCandidateBeforeHostOffsetIsRejected、testPostCaretCharacterMismatchIsRejected、testPostCaretReadUnavailableStillMaps、testNativeHostAnchorHitsItsOwnOffset、testAnchorWindowLengthBoundAtDocumentStart、testUnsupportedAnchorReadKeepsReportedOffset、testFailedAnchorReadEmitsNoSnapshot、testCanonicallyEquivalentAnchorUsesFoundLength、testUnreadableValueWithReadableAnchorStillRecoversLastGoodText、testWhitespaceVariantAnchorStillMaps、testWhitespaceOnlyMatchIsRejected、testPostCaretWhitespaceSkipsCorroboration、testValueWhitespaceAtMappedIndexSkipsCorroboration。
 
 2026-10-13 当前源码全量共 302 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）把整个编辑器报成一个输入框（89% 屏高）时跟随卡贴屏幕顶缘、飘出焦点窗口的问题：高度超过所在屏 0.6 倍的输入框矩形不再作为跟随避让障碍、卡片贴光标行落下，恰为 0.6 倍及以下仍按既有规则避让（由 0.6 门槛边界用例 testFollowingCardKeepsAFieldAtExactlyTheHeightLimit 锁定）；新增回归用例 testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen；≤0.6 屏高输入框行为不变由终审 17 夹具×多高度扫描单测核验，输出与基线逐字一致。
 
