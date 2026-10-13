@@ -49,6 +49,25 @@ final class OverlayCoordinatorRenderingTests: XCTestCase {
         XCTAssertTrue(screen.visibleFrame.contains(frame), "\(frame) vs \(screen.visibleFrame)")
     }
 
+    /// 面板高度不得小于实测文本高度：NSHostingView 的 fittingSize 上屏后会
+    /// 塌缩（实测 279 字符译文只报 110 点），面板比内容矮时卡片会画出面板
+    /// 之外、压住输入行（用户 2026-10-10 复现）。
+    func testCardPanelIsNeverShorterThanItsMeasuredText() throws {
+        coordinator.neverHide = true
+        let source = String(repeating: "圈红的这些地方都是大片留白，思考下布局。", count: 3)
+        let translation = String(
+            repeating: "These places in the red circle are all large areas left blank. ", count: 4)
+        coordinator.showRealtime(source: source, translation: translation, key: "live",
+            session: InputSessionID(pid: 1),
+            anchor: InputAnchor(caretFrame: NSRect(x: 200, y: 400, width: 1, height: 20), fieldFrame: nil))
+        let frame = try XCTUnwrap(coordinator.visiblePanelFrames.first)
+        let text = source + "\n\n" + translation
+        let contentWidth = OverlaySizing.measuredContentWidth(text: text, fontSize: coordinator.textSize.points)
+        let measured = OverlaySizing.textHeight(
+            text: text, fontSize: coordinator.textSize.points, width: contentWidth)
+        XCTAssertGreaterThanOrEqual(frame.height, measured, "面板不得矮于实测文本高度：\(frame)")
+    }
+
     func testRefreshedLongCardStaysClamped() throws {
         coordinator.neverHide = true
         let key = "test-key"

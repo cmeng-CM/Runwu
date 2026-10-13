@@ -567,8 +567,69 @@ struct OverlayTranslationContext: Equatable, Sendable {
     let backend: TranslationBackend
 }
 
+/// 自动摆位的净空几何：屏内边距、「整张放得下」判定，以及固定槽位卡被
+/// 输入框压住时的最小挪位。跟随布局与固定槽位共用同一套边距。
+enum OverlayPlacement {
+    static let margin: CGFloat = 8
+    static let gap: CGFloat = 6
+    /// 跟随卡选择输入框上方/下方时，光标贴中线附近的位移不触发翻面：
+    /// 两侧差不到这个距离就沿用默认侧，避免光标在中线上下轻移时卡片
+    /// 在两三百点开外来回跳。
+    static let flipDeadZone: CGFloat = 12
+
+    static func fits(_ frame: NSRect, in bounds: NSRect) -> Bool {
+        frame.minX >= bounds.minX + margin && frame.maxX <= bounds.maxX - margin
+            && frame.minY >= bounds.minY + margin && frame.maxY <= bounds.maxY - margin
+    }
+
+    /// 绕开输入框：上/下/左/右四个方向各试一次贴边落点，钳回屏幕后取位移
+    /// 最小的那个（不考虑方向，只算曼哈顿位移，不会为了「先垂直」多绕远）。
+    /// 四个方向都放不下就返回 nil，由调用方留在原处。不相交时原样返回——
+    /// 位置稳定优先，输入框挪开后自动回到原位。
+    static func cleared(_ frame: NSRect, of obstacle: NSRect, in bounds: NSRect) -> NSRect? {
+        guard frame.intersects(obstacle) else { return frame }
+        let size = frame.size
+        func clamped(_ origin: CGPoint) -> NSRect {
+            NSRect(
+                x: min(max(origin.x, bounds.minX + margin), max(bounds.minX + margin, bounds.maxX - margin - size.width)),
+                y: min(max(origin.y, bounds.minY + margin), max(bounds.minY + margin, bounds.maxY - margin - size.height)),
+                width: size.width, height: size.height)
+        }
+        let candidates = [
+            clamped(CGPoint(x: frame.minX, y: obstacle.maxY + gap)),
+            clamped(CGPoint(x: frame.minX, y: obstacle.minY - gap - size.height)),
+            clamped(CGPoint(x: obstacle.maxX + gap, y: frame.minY)),
+            clamped(CGPoint(x: obstacle.minX - gap - size.width, y: frame.minY)),
+        ].filter { fits($0, in: bounds) && !$0.intersects(obstacle) }
+        func distance(_ rect: NSRect) -> CGFloat {
+            abs(rect.minX - frame.minX) + abs(rect.minY - frame.minY)
+        }
+        return candidates.min(by: { distance($0) < distance($1) })
+    }
+
+    static func overlap(_ a: NSRect, _ b: NSRect) -> CGFloat {
+        guard a.intersects(b) else { return 0 }
+        let hit = a.intersection(b)
+        return hit.width * hit.height
+    }
+}
+
 /// Placement uses global Cocoa points and the display containing the actual
 /// anchor, including negative origins. It never invents an insertion point.
+///
+/// 跟随卡的第一要求是别压住用户正在看的地方：宿主可能把光标框报在输入行
+/// 之外（实测 ZCode 报高一整行），只盯着这个矩形「下方放不下就翻到上方」
+/// 的旧规则会把卡片正好落在输入行上——用户看不到自己打的字，也找不到
+/// 光标。因此把「输入框 ∪ 光标框」当作整块障碍，按下列顺序取第一个在屏内
+/// 放得下的候选：
+///   1. 障碍下方 / 上方（先试离光标更近的那侧，中线附近留死区不翻面）：
+///      整段输入框留在视野里；
+///   2. 光标行左 / 右侧：输入框顶天立地、上下都没位置时从侧面贴近；
+///   3. 兜底：没有干净位置时，优先贴光标上下（整屏编辑器这类输入框布满
+///      屏幕，贴光标才是用户要的），与贴屏幕上下缘比一比，取压住输入框
+///      面积更小的那个。
+/// 宿主不报告输入框时障碍就是光标框：先下/上、再光标行左右，光标行始终
+/// 不被压住（旧实现只能把卡片钳进屏幕，可能反过来盖住光标）。
 struct OverlayFollowingLayout {
     static func frame(size: NSSize, anchor: InputAnchor, screens: [NSRect]) -> NSRect? {
         let candidates = [anchor.caretFrame, anchor.fieldFrame].compactMap { $0 }
@@ -580,14 +641,53 @@ struct OverlayFollowingLayout {
             return (target, screen)
         }.first
         guard let (target, screen) = placement else { return nil }
-        let margin: CGFloat = 8, gap: CGFloat = 6
+        let margin = OverlayPlacement.margin, gap = OverlayPlacement.gap
         let width = min(size.width, screen.width - margin * 2)
         let height = min(size.height, screen.height - margin * 2)
-        let below = target.minY - gap - height
-        let proposedY = below >= screen.minY + margin ? below : target.maxY + gap
-        let x = min(max(target.minX, screen.minX + margin), screen.maxX - width - margin)
-        let y = min(max(proposedY, screen.minY + margin), screen.maxY - height - margin)
-        return NSRect(x: x, y: y, width: width, height: height)
+        let x = min(max(target.minX, screen.minX + margin), max(screen.minX + margin, screen.maxX - width - margin))
+        func rect(_ x: CGFloat, _ y: CGFloat) -> NSRect {
+            NSRect(x: x, y: y, width: width, height: height)
+        }
+        let obstacle = obstacle(anchor: anchor, screen: screen) ?? target
+        let below = rect(x, obstacle.minY - gap - height)
+        let above = rect(x, obstacle.maxY + gap)
+        let caret = valid(anchor.caretFrame, screen: screen)
+        // 先试离光标更近的那侧；没有可信光标时先试下方（阅读顺序）
+        let preferAbove = caret.map {
+            obstacle.maxY - $0.maxY + OverlayPlacement.flipDeadZone < $0.minY - obstacle.minY
+        } ?? false
+        if let fitted = (preferAbove ? [above, below] : [below, above])
+            .first(where: { OverlayPlacement.fits($0, in: screen) }) { return fitted }
+        let lineY = min(
+            max((caret ?? obstacle).midY - height / 2, screen.minY + margin),
+            max(screen.minY + margin, screen.maxY - height - margin))
+        if let fitted = [rect(obstacle.maxX + gap, lineY), rect(obstacle.minX - gap - width, lineY)]
+            .first(where: { OverlayPlacement.fits($0, in: screen) }) { return fitted }
+        var fallbacks: [NSRect] = []
+        if let caret {
+            fallbacks += [rect(x, caret.maxY + gap), rect(x, caret.minY - gap - height)]
+        }
+        fallbacks += [rect(x, screen.maxY - margin - height), rect(x, screen.minY + margin)]
+        return fallbacks.filter { OverlayPlacement.fits($0, in: screen) }
+            .min(by: { OverlayPlacement.overlap($0, obstacle) < OverlayPlacement.overlap($1, obstacle) })
+            ?? rect(x, screen.minY + margin)
+    }
+
+    /// 障碍区域：输入框矩形并入光标框。宿主把光标框报在输入框之外时，
+    /// 只避输入框仍会把卡片落在输入行上，所以两者取并集；任一矩形不可信
+    /// （非有限值、零高度、不在本屏）就只用余下的那个。两者都不可信时
+    /// 返回 nil，调用方以目标矩形兜底。
+    static func obstacle(anchor: InputAnchor, screen: NSRect) -> NSRect? {
+        let rects = [anchor.fieldFrame, anchor.caretFrame].compactMap { valid($0, screen: screen) }
+        guard var region = rects.first else { return nil }
+        for rect in rects.dropFirst() { region = region.union(rect) }
+        return region
+    }
+
+    private static func valid(_ rect: NSRect?, screen: NSRect) -> NSRect? {
+        guard let rect, InputScreenLayout.finite(rect), rect.width >= 0, rect.height > 0,
+            screen.intersects(rect) else { return nil }
+        return rect
     }
 }
 
@@ -722,10 +822,22 @@ struct OverlayFollowingLayout {
     /// overlays that are already on screen.
     func refreshAppearance() {
         for entry in entries {
-            entry.panel.contentView = NSHostingView(
-                rootView: makeView(text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id))
+            entry.panel.contentView = hostingView(
+                text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
         }
         relayout()
+    }
+
+    /// 面板内容一律用「不让 SwiftUI 决定窗口尺寸」的承载方式：默认选项会把
+    /// 窗口的内容最小/最大尺寸绑到 SwiftUI 的内在尺寸上，而这份内在尺寸上屏
+    /// 后可能塌缩（实测 279 字符译文只报 110 点）——面板被设成实测高度 114
+    /// 点后又被最大值夹回 110 点，卡片画出面板之外、压住输入行。只保留
+    /// 「可查询内在尺寸」，尺寸一律由 relayout 按实测文本高度决定。
+    private func hostingView(text: String, textHeightLimit: CGFloat?, id: UUID)
+        -> NSHostingView<TranslationOverlayView> {
+        let host = NSHostingView(rootView: makeView(text: text, textHeightLimit: textHeightLimit, id: id))
+        host.sizingOptions = [.intrinsicContentSize]
+        return host
     }
     func show(_ text: String, on screen: NSScreen?) { show(text, key: UUID().uuidString, on: screen) }
     func show(_ text: String, key: String, on screen: NSScreen?, avoid: NSRect? = nil,
@@ -822,9 +934,12 @@ struct OverlayFollowingLayout {
             maxCardHeight: cardHeightLimit(on: entry.screen),
             chromeHeight: chrome)
         entry.textHeightLimit = plan.textHeightLimit
-        entry.plannedCardHeight = plan.scrolls ? plan.cardHeight : nil
-        entry.panel.contentView = NSHostingView(
-            rootView: makeView(text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id))
+        // 面板高度预算始终记录：非滚动卡也要用，因为 NSHostingView 的
+        // fittingSize 在视图上屏后会塌缩（实测 279 字符译文只报 110 点），
+        // 面板比内容矮时卡片会画出面板之外、压住输入行。
+        entry.plannedCardHeight = plan.cardHeight
+        entry.panel.contentView = hostingView(
+            text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
     }
 
     /// Card height ceiling: roughly 60% of the visible screen so long
@@ -1045,7 +1160,7 @@ struct OverlayFollowingLayout {
         installContent(for: entry)
         if entry.detached, let view = entry.panel.contentView {
             var size = view.fittingSize
-            if let height = entry.plannedCardHeight { size.height = height }
+            size.height = max(size.height, entry.plannedCardHeight ?? 0)
             entry.panel.setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
         } else { relayout() }
     }
@@ -1079,6 +1194,9 @@ struct OverlayFollowingLayout {
     func updateAnchor(_ anchor: InputAnchor, session: InputSessionID) {
         for entry in entries where entry.origin == .realtime(session) && !entry.detached {
             entry.inputAnchor = anchor
+            // 固定模式（跟随关闭）靠 avoid 避让输入框；输入框随窗口/换行移动后
+            // 这里必须同步，否则卡片会照旧槽位压住已经挪过来的输入框。
+            entry.avoid = anchor.fieldFrame
             entry.screen = screen(containing: anchor) ?? entry.screen
         }
         relayout()
@@ -1097,11 +1215,15 @@ struct OverlayFollowingLayout {
         isApplyingProgrammaticFrame = true
         defer { isApplyingProgrammaticFrame = false }
         var stackIndex = 0
+        var autoPlaced: [(entry: Entry, frame: NSRect)] = []
         for entry in entries {
             if entry.contentPinned { continue }
             entry.panel.contentView?.layoutSubtreeIfNeeded()
             let fitting = entry.panel.contentView?.fittingSize ?? entry.panel.frame.size
-            let size = NSSize(width: fitting.width, height: entry.plannedCardHeight ?? fitting.height)
+            // 高度取「实测渲染」与「文本量预估」的较大值：fittingSize 会塌缩
+            // （上屏后常见的只报头部高度），沿用塌缩值会让卡片画出面板之外。
+            let size = NSSize(width: fitting.width,
+                height: max(fitting.height, entry.plannedCardHeight ?? 0))
             if entry.isPinned {
                 if entry.isRealtime { continue }
                 let old = entry.panel.frame
@@ -1112,6 +1234,14 @@ struct OverlayFollowingLayout {
             if entry.isRealtime && followCaret {
                 if let anchor = entry.inputAnchor,
                     let frame = OverlayFollowingLayout.frame(size: size, anchor: anchor, screens: followingScreenFrames()) {
+                    // 落点日志：只有坐标与「是否压住输入框」，用来在宿主报偏几何时
+                    // 直接看出卡片落到了哪里（仅在落点变化时记，不刷屏）。
+                    if entry.panel.frame != frame {
+                        DiagnosticLog.write(
+                            "follow card frame=\(AccessibilityMonitor.coordinates(frame))"
+                                + " covers_field=\(anchor.fieldFrame.map { frame.intersects($0) }.map(String.init) ?? "unknown")"
+                                + " covers_caret=\(anchor.caretFrame.map { frame.intersects($0) }.map(String.init) ?? "unknown")")
+                    }
                     entry.panel.setFrame(frame, display: true)
                     if !entry.panel.isVisible { entry.panel.orderFrontRegardless() }
                 } else { entry.panel.orderOut(nil) }
@@ -1124,28 +1254,43 @@ struct OverlayFollowingLayout {
                 stackIndex += 1
                 continue
             }
-            if entry.slot == nil {
-                entry.slot = resolveSlot(size: size, avoid: entry.avoid, screen: entry.screen, stackIndex: stackIndex)
-            }
-            entry.panel.setFrame(position(for: size, on: entry.screen, slot: entry.slot ?? position,
-                stackIndex: stackIndex), display: true)
-            if entry.isRealtime && !entry.panel.isVisible { entry.panel.orderFrontRegardless() }
+            autoPlaced.append((entry, slotFrame(for: entry, size: size, stackIndex: stackIndex)))
             stackIndex += 1
+        }
+        // 自动摆位的固定卡按显示器成组落地：组内任一成员被当前输入框压住时
+        // 整组同向挪开并保持堆叠间距。各自挪位会让后面的卡压住前面的卡。
+        for (entry, frame) in autoPlaced {
+            entry.panel.setFrame(groupedFrame(frame, of: entry, group: autoPlaced), display: true)
+            if entry.isRealtime && !entry.panel.isVisible { entry.panel.orderFrontRegardless() }
         }
     }
 
-    /// Picks the first placement that does not cover the focused text field,
-    /// preferring the user's configured position.
-    private func resolveSlot(size: NSSize, avoid: NSRect?, screen: NSScreen?, stackIndex: Int) -> OverlayPosition {
-        guard let avoid, avoid != .zero else { return position }
-        let keepOut = avoid.insetBy(dx: -6, dy: -6)
-        var candidates: [OverlayPosition] = [position]
-        candidates.append(contentsOf: OverlayPosition.allCases.filter { $0 != position })
-        for candidate in candidates {
-            let frame = position(for: size, on: screen, slot: candidate, stackIndex: stackIndex)
-            if !frame.intersects(keepOut) { return candidate }
+    /// 固定卡的配置槽位落点（含堆叠偏移）；输入框避让在整组一步做。
+    private func slotFrame(for entry: Entry, size: NSSize, stackIndex: Int) -> NSRect {
+        let slot = entry.slot ?? position
+        entry.slot = slot
+        return position(for: size, on: entry.screen, slot: slot, stackIndex: stackIndex)
+    }
+
+    /// 同屏自动卡作为一组让开输入框：组内确实有成员被压住时，整组按同一
+    /// 增量挪开（只比整组包围盒与输入框相交就动会平白挪卡：两卡之间的空隙
+    /// 也能和包围盒相交），输入框移开后整组自动回到配置槽位。组里没有输入
+    /// 框信息的卡片（剪贴板卡）随组一起走，否则会被挪开的实时卡反压住。
+    private func groupedFrame(_ frame: NSRect, of entry: Entry,
+        group: [(entry: Entry, frame: NSRect)]) -> NSRect {
+        let bounds = entry.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let members = group.filter { $0.entry.screen === entry.screen }
+        guard var union = members.first?.frame else { return frame }
+        var obstacle: NSRect?
+        for member in members.dropFirst() { union = union.union(member.frame) }
+        for member in members {
+            guard let avoid = member.entry.avoid, avoid != .zero, avoid.intersects(bounds) else { continue }
+            obstacle = obstacle.map { $0.union(avoid) } ?? avoid
         }
-        return position
+        guard let obstacle, members.contains(where: { $0.frame.intersects(obstacle) }),
+            let cleared = OverlayPlacement.cleared(union, of: obstacle, in: bounds) else { return frame }
+        return NSRect(x: frame.minX + (cleared.minX - union.minX), y: frame.minY + (cleared.minY - union.minY),
+            width: frame.width, height: frame.height)
     }
 
     private static func anchoredFrame(size: NSSize, topLeft: CGPoint, on screen: NSScreen?) -> NSRect {

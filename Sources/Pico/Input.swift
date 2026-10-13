@@ -358,6 +358,11 @@ public struct InputSessionID: Hashable, Sendable {
         // Independent geometry and composition precede text de-duplication.
         if geometry.anchor != lastAnchor {
             lastAnchor = geometry.anchor
+            // 几何日志：浮窗摆放按这两个矩形算，宿主报偏/不报时只能靠它定位
+            // （只记整数坐标，不含文本）。
+            DiagnosticLog.write(
+                "anchor caret=\(Self.coordinates(geometry.anchor.caretFrame))"
+                    + " field=\(Self.coordinates(geometry.anchor.fieldFrame))")
             onAnchorChanged?(geometry.anchor, capturedSession)
         }
         guard session == capturedSession else { return nil }
@@ -391,25 +396,48 @@ public struct InputSessionID: Hashable, Sendable {
         return (recovered, captured.session, captured.screen)
     }
 
+    /// 诊断探针：先报实时链路正在用的锚点几何（卡片摆放就是按它算的）；
+    /// 再按 pid 重新推导一次焦点文本元素，看宿主此刻是否给出可用元素。
+    /// 只报整数坐标、角色和包含关系，不含任何输入文本。
     func diagnosticProbe() -> String {
+        let live = " live_caret=\(Self.coordinates(lastAnchor?.caretFrame))"
+            + " live_field=\(Self.coordinates(lastAnchor?.fieldFrame))"
         reader.access.beginRead()
-        guard let target = lastExternalApp else { return "probe result=no_external_app_tracked" }
+        guard let target = lastExternalApp else { return "probe result=no_external_app_tracked" + live }
         guard !excludedBundleIDs.contains(target.bundleID), !reader.access.secureInputActive() else {
-            return "probe target=\(target.bundleID) result=protected_target"
+            return "probe target=\(target.bundleID) result=protected_target" + live
         }
         guard NSRunningApplication(processIdentifier: target.pid) != nil else {
-            return "probe target=\(target.bundleID) result=app_not_running"
+            return "probe target=\(target.bundleID) result=app_not_running" + live
         }
         let app = AXUIElementCreateApplication(target.pid)
         guard let raw = reader.access.attribute(app, kAXFocusedUIElementAttribute as String),
             CFGetTypeID(raw) == AXUIElementGetTypeID(),
             let field = reader.resolve(raw as! AXUIElement, pid: target.pid) else {
-            return "probe target=\(target.bundleID) result=no_text_element"
+            return "probe target=\(target.bundleID) result=no_text_element" + live
         }
         let rawRole = reader.access.attribute(field, kAXRoleAttribute as String) as? String
         let knownRoles = [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String]
         let role = rawRole.flatMap { knownRoles.contains($0) ? $0 : nil } ?? "unknown"
+        let geometry = reader.geometry(field, pid: target.pid, bundleID: target.bundleID,
+            excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames()))
+        let caret = geometry?.anchor.caretFrame, box = geometry?.anchor.fieldFrame
+        let inside = caret.flatMap { caret in box.map { $0.contains(caret) } }
         return "probe target=\(target.bundleID) result=text_element_found role=\(role)"
+            + " caret=\(Self.coordinates(caret)) field=\(Self.coordinates(box))"
+            + " caret_in_field=\(inside.map(String.init) ?? "unknown")" + live
+    }
+
+    /// 诊断探针用：矩形转整数串；nil 表示宿主没有报告该矩形。宿主报出
+    /// 荒谬但有限的坐标（非有限值已被 finite 拦掉）时逐项标 insane——
+    /// 坏几何只该出现在报告里，不该让「生成诊断报告」当场崩掉。
+    nonisolated static func coordinates(_ rect: NSRect?) -> String {
+        guard let rect else { return "nil" }
+        func value(_ number: CGFloat) -> String {
+            guard number.isFinite, number.magnitude < 10_000_000 else { return "insane" }
+            return String(Int(number.rounded()))
+        }
+        return [rect.minX, rect.minY, rect.width, rect.height].map(value).joined(separator: ",")
     }
 
     /// Recheck the same qualification before value reads and replacement writes;

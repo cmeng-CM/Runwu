@@ -255,10 +255,35 @@ struct AXFieldReader {
         let marked = access.readAttribute(element, "AXTextInputMarkedRange")
         let composing: Bool? = marked.permitsOptionalMetadata
             ? (range(marked.value).map { $0.length > 0 } ?? false) : nil
-        let field = layout.fieldRect(elementFrame(element))
+        // 输入框矩形：焦点元素自己报不出时向上找（Chromium contenteditable 常见）。
+        // 光标先按无输入框校验算一次，兜底定位要用它的横向位置。
+        var field = layout.fieldRect(elementFrame(element))
         let caret = caretFrame(element, selected: selected, field: field, layout: layout)
+        if field == nil, let caretX = caret?.midX {
+            field = enclosingFieldFrame(element, caretX: caretX, layout: layout)
+        }
         return Geometry(anchor: InputAnchor(caretFrame: caret, fieldFrame: field),
             selectedRange: selected, isComposing: composing)
+    }
+
+    /// 输入框矩形兜底：向上找最近的「像输入框」的祖先——矩形有效、与本屏相交、
+    /// 横向盖住光标，且高度不接近整屏（整窗/整页容器当障碍会让卡片无处可躲）。
+    /// 焦点元素在 Chromium contenteditable 里常是深层文本节点，自己不带矩形，
+    /// 但它上面的容器就是可见输入框。
+    func enclosingFieldFrame(_ element: AXUIElement, caretX: CGFloat, layout: InputScreenLayout) -> NSRect? {
+        var current: AXUIElement? = element
+        for _ in 0..<4 {
+            guard let node = current, let parent = access.attribute(node, kAXParentAttribute as String),
+                CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
+            let candidate = parent as! AXUIElement
+            current = candidate
+            guard let rect = layout.fieldRect(elementFrame(candidate)),
+                let screen = layout.frames.first(where: { $0.intersects(rect) }),
+                rect.height <= screen.height * 0.6,
+                rect.insetBy(dx: -2, dy: 0).contains(NSPoint(x: caretX, y: rect.midY)) else { continue }
+            return rect
+        }
+        return nil
     }
 
     func text(_ element: AXUIElement) -> String? {

@@ -54,6 +54,20 @@ final class DiagnosticsReportTests: XCTestCase {
             DiagnosticsReport.fileName(at: Date()).matches(pattern: #"^Runwu-Diagnostics-\d{8}-\d{6}\.txt$"#))
     }
 
+    /// 探针几何：整数坐标进报告，宿主没报告的矩形显式写 nil——跟随卡避让
+    /// 输入框依赖输入框矩形，「缺失」与「偏移」必须能一眼区分。
+    func testProbeGeometryFormattingRoundsAndMarksMissingRects() {
+        XCTAssertEqual(
+            AccessibilityMonitor.coordinates(NSRect(x: 302.4, y: 288.6, width: 1, height: 20.2)),
+            "302,289,1,20")
+        XCTAssertEqual(AccessibilityMonitor.coordinates(nil), "nil")
+        // 坏宿主报出荒谬但有限的值时不许在 Int() 上崩：逐项标 insane
+        XCTAssertEqual(AccessibilityMonitor.coordinates(NSRect(x: 1e300, y: 0, width: 10, height: 10)),
+            "insane,0,10,10")
+        XCTAssertEqual(AccessibilityMonitor.coordinates(NSRect(x: 0, y: 0, width: CGFloat.infinity, height: 10)),
+            "0,0,insane,10")
+    }
+
     func testRingBufferKeepsRecentLinesInOrderAndBounded() {
         DiagnosticLog.write("ring-test-first")
         for index in 0..<405 { DiagnosticLog.write("ring-test-fill-\(index)") }

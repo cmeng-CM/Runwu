@@ -50,6 +50,34 @@ final class CaretTrackingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(fixture.geometry()).anchor.caretFrame?.minX, 240)
     }
 
+    /// 焦点文本节点自己不报矩形时（Chromium contenteditable 实测如此），
+    /// 向上取最近的「像输入框」的祖先矩形，浮窗避让才有边界可用。
+    func testFieldFrameFallsBackToNearestPlausibleAncestor() throws {
+        let fixture = AXFixture()
+        fixture.missingFrameFor = fixture.first
+        fixture.parents[fixture.first] = fixture.container
+        fixture.frames[fixture.container] = NSRect(x: 200, y: 150, width: 600, height: 120)
+        let geometry = try XCTUnwrap(fixture.geometry())
+        XCTAssertEqual(geometry.anchor.fieldFrame, NSRect(x: 200, y: 630, width: 600, height: 120))
+        XCTAssertNotNil(geometry.anchor.caretFrame, "兜底取框不得丢掉光标")
+    }
+
+    /// 兜底只认「像输入框」的祖先：接近整屏的整窗/整页容器要跳过，
+    /// 否则障碍等于整个屏幕，卡片反而无处可放。
+    func testFieldFrameFallbackSkipsWindowSizedContainers() throws {
+        let fixture = AXFixture()
+        fixture.missingFrameFor = fixture.first
+        fixture.parents[fixture.first] = fixture.container
+        fixture.frames[fixture.container] = NSRect(x: 0, y: 0, width: 1440, height: 880)
+        XCTAssertNil(try XCTUnwrap(fixture.geometry()).anchor.fieldFrame)
+
+        fixture.parents[fixture.container] = fixture.second
+        fixture.frames[fixture.second] = NSRect(x: 180, y: 140, width: 700, height: 140)
+        let geometry = try XCTUnwrap(fixture.geometry())
+        XCTAssertEqual(geometry.anchor.fieldFrame, NSRect(x: 180, y: 620, width: 700, height: 140),
+            "整窗容器跳过，继续向上取真正像输入框的那层")
+    }
+
     func testTextMarkerFallbackRejectsSelectionRunAndInvalidCoordinates() throws {
         let fixture = AXFixture()
         fixture.direct = nil
@@ -436,6 +464,10 @@ private final class AXFixture {
     var direct: NSRect? = NSRect(x: 220, y: 150, width: 1, height: 20)
     var previous: NSRect?, next: NSRect?, marker: NSRect?
     var field = NSRect(x: 100, y: 100, width: 400, height: 200)
+    /// 输入框矩形兜底用：该元素不报 AXPosition/AXSize；父链与逐元素矩形覆盖
+    var missingFrameFor: AXUIElement?
+    var parents: [AXUIElement: AXUIElement] = [:]
+    var frames: [AXUIElement: NSRect] = [:]
     var attributeReads = 0, contentReads = 0, childReads = 0
     var simulatedTime: TimeInterval = 0, readCost: TimeInterval = 0
     let screens = [NSRect(x: 0, y: 0, width: 1440, height: 900)]
@@ -469,9 +501,15 @@ private final class AXFixture {
             case "AXSelectedTextRange": return Self.range(selected)
             case "AXTextInputMarkedRange": return marked.map(Self.range)
             case "AXPosition":
-                var point = field.origin; return AXValueCreate(.cgPoint, &point)
+                if let missing = missingFrameFor, CFEqual(element, missing) { return nil }
+                var point = (frames[element] ?? field).origin
+                return AXValueCreate(.cgPoint, &point)
             case "AXSize":
-                var size = field.size; return AXValueCreate(.cgSize, &size)
+                if let missing = missingFrameFor, CFEqual(element, missing) { return nil }
+                var size = (frames[element] ?? field).size
+                return AXValueCreate(.cgSize, &size)
+            case "AXParent":
+                return parents[element]
             case "AXValue":
                 contentReads += 1; return text.map { $0 as CFString }
             case "AXNumberOfCharacters": return NSNumber(value: text?.utf16.count ?? 0)

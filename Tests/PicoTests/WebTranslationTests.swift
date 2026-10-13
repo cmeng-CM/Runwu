@@ -2,11 +2,12 @@ import Foundation
 import XCTest
 @testable import Pico
 
-/// Wire fixtures checked 2026-10-08 against protocol research and:
+/// Wire fixtures checked 2026-10-12 against protocol research and:
 /// https://translate.googleapis.com/translate_a/single
 /// https://www.bing.com/translator (rich_tta, helper TTL and SFX)
-/// https://fanyi.youdao.com
+/// https://fanyi.youdao.com (anonymous page cookie before the signed key handshake)
 /// https://shared.ydstatic.com/dict/translation-website/1.0.7/js/app.5a9933f2.js
+/// .../js/textTranslate.b07ee3fe.js (translate body fields and key id)
 /// AES literals were generated independently with system openssl AES-128-CBC
 /// using raw MD5 key/IV bytes. These are synthetic fixture keys, not credentials.
 @MainActor
@@ -17,6 +18,10 @@ final class WebTranslationTests: XCTestCase {
     private static let cipher = "laoZf93DZrR9iFG6a84_Jl6NxLJz1K7tJGT6oYQg0k0gJYjIlTmDSDuz2tTS2jW-foQj1LxpxR3HrNNS4swponw3QWCgFSuNoPpDytLHsVAmxLy_hxJz9YrjTmdFDaaHi2tl0nUz0mAL7SEAnE12T-RVBAPkqpNlz7NvpWpdJr28pc_iLA5aj-Fe1qluRXxVEuNkWkDNe81IQlIfX2IGgg"
     private static let emptyCipher = "laoZf93DZrR9iFG6a84_JiZWRusZYfxAZzJ625zNxEU"
     private static let invalidCipher = "PHOugYFw2mM9zzebnf1qlw"
+    /// Decrypts to `{"code":50}`, the answer a rejected session cookie returns.
+    private static let rejectedCipher = "2Fbfz1_lhMkBkfpgq1ar-A"
+    private static let keys = #"{"code":0,"data":{"secretKey":"fixture-sign-key","aesKey":"fixture-aes-key","aesIv":"fixture-aes-iv"}}"#
+    private static let renewedKeys = #"{"code":0,"data":{"secretKey":"fixture-renewed-key","aesKey":"fixture-aes-key","aesIv":"fixture-aes-iv"}}"#
 
     override func tearDown() async throws {
         sessions.forEach { $0.invalidateAndCancel() }
@@ -142,31 +147,77 @@ final class WebTranslationTests: XCTestCase {
         let engine = YoudaoTranslationEngine(session: session, now: { Date(timeIntervalSince1970: 1700000000.123) })
         let result = try await engine.translate(special, from: .chinese, to: .english)
         XCTAssertEqual(result, "Hello, world.\nSecond line.")
-        XCTAssertEqual(fixture.requests.count, 2)
-        let getter = fixture.requests[0], post = fixture.requests[1]
+        XCTAssertEqual(fixture.requests.count, 3)
+        let page = fixture.requests[0], getter = fixture.requests[1], post = fixture.requests[2]
+        XCTAssertEqual(page.url!.absoluteString, "https://fanyi.youdao.com/", "The page view issues the session cookie")
+        XCTAssertNil(page.httpBody)
         XCTAssertEqual(getter.url!.path, "/webtranslate/key")
         let keyQuery = decode(getter.url!.query!)
-        XCTAssertEqual(keyQuery["keyid"], "webfanyi-key-getter")
+        XCTAssertEqual(keyQuery["keyid"], "webfanyi-key-getter-2025")
         XCTAssertEqual(keyQuery["mysticTime"], "1700000000123")
-        XCTAssertEqual(keyQuery["sign"], "a90d138db345e175373175dc36a0ef4e")
+        XCTAssertEqual(keyQuery["sign"], "243f0f04630d1cbc441d1ee74fd56a65")
+        XCTAssertEqual(keyQuery["appVersion"], "12.0.0")
+        XCTAssertEqual(keyQuery["yduuid"], "yU5nT5dK3eZ1pI4j")
+        XCTAssertTrue(getter.value(forHTTPHeaderField: "Cookie")?.contains("OUTFOX_SEARCH_USER_ID=fixture-user") == true)
         XCTAssertEqual(post.url!.path, "/webtranslate"); XCTAssertEqual(post.httpMethod, "POST")
         let body = decodeBody(post)
         XCTAssertEqual(body["keyid"], "webfanyi"); XCTAssertEqual(body["sign"], "a1fb8dba880ff50e4875825336c1a8b0")
         XCTAssertEqual(body["i"], special); XCTAssertEqual(body["from"], "auto"); XCTAssertEqual(body["to"], "en")
-        XCTAssertEqual(body["dictResult"], "false")
+        XCTAssertEqual(body["dictResult"], "false"); XCTAssertEqual(body["noCheckPrivate"], "false")
+        XCTAssertTrue(post.value(forHTTPHeaderField: "Cookie")?.contains("OUTFOX_SEARCH_USER_ID=fixture-user") == true)
         XCTAssertEqual(post.value(forHTTPHeaderField: "Referer"), "https://fanyi.youdao.com/")
         XCTAssertFalse(fixture.requests.contains { $0.url!.path.contains("jsonapi") }, "Dictionary results cannot stand in for a sentence")
     }
 
+    func testYoudaoReusesTheAnonymousSessionAcrossTranslations() async throws {
+        let (session, fixture) = makeSession(bootstrap(.youdao) + [.text(Self.cipher),
+            .text(Self.keys), .text(Self.cipher)])
+        let engine = YoudaoTranslationEngine(session: session)
+        _ = try await engine.translate("第一句。", from: .chinese, to: .english)
+        _ = try await engine.translate("第二句。", from: .chinese, to: .english)
+        XCTAssertEqual(fixture.requests.count, 5, "Keys are signed per request, the page session is taken once")
+        XCTAssertEqual(fixture.requests.filter { $0.url!.host == "fanyi.youdao.com" }.count, 1)
+        XCTAssertEqual(fixture.requests[3].url!.path, "/webtranslate/key")
+        XCTAssertTrue(fixture.requests[4].value(forHTTPHeaderField: "Cookie")?.contains("OUTFOX_SEARCH_USER_ID=fixture-user") == true)
+    }
+
+    func testYoudaoRetriesARejectedSessionExactlyOnceWithAFreshCookie() async throws {
+        let plans = [sessionPage(cookie: "first@127.0.0.1"), .text(Self.keys), .text(Self.rejectedCipher)]
+            + [sessionPage(cookie: "second@127.0.0.1"), .text(Self.renewedKeys), .text(Self.cipher)]
+        let (session, fixture) = makeSession(plans)
+        let engine = YoudaoTranslationEngine(session: session, now: { Date(timeIntervalSince1970: 1700000000.123) })
+        let result = try await engine.translate("你好。", from: .chinese, to: .english)
+        XCTAssertEqual(result, "Hello, world.\nSecond line.")
+        XCTAssertEqual(fixture.requests.count, 6)
+        XCTAssertEqual(fixture.requests[2].httpMethod, "POST")
+        XCTAssertTrue(fixture.requests[2].value(forHTTPHeaderField: "Cookie")?.contains("first@127.0.0.1") == true)
+        XCTAssertEqual(fixture.requests[3].url!.absoluteString, "https://fanyi.youdao.com/", "A rejected cookie must be replaced, not reused")
+        XCTAssertTrue(fixture.requests[5].value(forHTTPHeaderField: "Cookie")?.contains("second@127.0.0.1") == true)
+        XCTAssertEqual(decodeBody(fixture.requests[5])["sign"], "90515b3b3099cfb9dec5ef021d9a05d9", "The retry re-signs with the renewed key")
+    }
+
+    func testYoudaoStopsAfterOneRejectedSessionRetry() async throws {
+        let (session, fixture) = makeSession(bootstrap(.youdao) + [.text(Self.rejectedCipher),
+            sessionPage(), .text(Self.keys), .text(Self.rejectedCipher)])
+        await assertError(YoudaoTranslationEngine(session: session), expected: .upstream(.youdao, 50))
+        XCTAssertEqual(fixture.requests.count, 6, "A second code 50 must stop, never loop")
+    }
+
+    func testYoudaoPageWithoutSessionCookieFailsHandshakeBeforeTranslate() async throws {
+        let (session, fixture) = makeSession([.text("<html>no cookie</html>")])
+        await assertError(YoudaoTranslationEngine(session: session), expected: .handshake(.youdao))
+        XCTAssertEqual(fixture.requests.count, 1)
+    }
+
     func testYoudaoMalformedKeysCiphertextPaddingAndPayloadFailExplicitly() async throws {
         for (plans, expected) in [
-            ([WebPlan.text(#"{"code":0,"data":{"secretKey":"fixture-sign-key"}}"#)], WebTranslationError.handshake(.youdao)),
-            ([WebPlan.text(#"{"code":false,"data":{"secretKey":"fixture-sign-key","aesKey":"fixture-aes-key","aesIv":"fixture-aes-iv"}}"#)], .invalidResponse(.youdao)),
+            (bootstrap(.youdao, keys: #"{"code":0,"data":{"secretKey":"fixture-sign-key"}}"#), WebTranslationError.handshake(.youdao)),
+            (bootstrap(.youdao, keys: #"{"code":false,"data":{"secretKey":"fixture-sign-key","aesKey":"fixture-aes-key","aesIv":"fixture-aes-iv"}}"#), .invalidResponse(.youdao)),
             (bootstrap(.youdao) + [.text("invalid!base64")], .invalidResponse(.youdao)),
             (bootstrap(.youdao) + [.text("dzTa68kgyc6dT8c56QLCKA")], .decryption(.youdao)),
             (bootstrap(.youdao) + [.text(Self.invalidCipher)], .invalidResponse(.youdao)),
             (bootstrap(.youdao) + [.text(Self.emptyCipher)], .emptyResult(.youdao)),
-            (bootstrap(.youdao) + [.text(#"{"code":50,"msg":"SENTINEL_INPUT_SECRET"}"#)], .upstream(.youdao, 50)),
+            (bootstrap(.youdao) + [.text(#"{"code":50,"msg":"SENTINEL_INPUT_SECRET"}"#)] + bootstrap(.youdao) + [.text(#"{"code":50,"msg":"SENTINEL_INPUT_SECRET"}"#)], .upstream(.youdao, 50)),
         ] {
             let (session, _) = makeSession(plans)
             await assertError(YoudaoTranslationEngine(session: session), expected: expected)
@@ -178,7 +229,7 @@ final class WebTranslationTests: XCTestCase {
             for status in [401, 403, 429, 500] {
                 let (session, fixture) = makeSession(bootstrap(provider) + [.text("SENTINEL_INPUT_SECRET", status: status)])
                 await assertError(engine(provider, session: session), expected: .httpStatus(provider, status))
-                XCTAssertEqual(fixture.requests.count, provider == .google ? 1 : 2)
+                XCTAssertEqual(fixture.requests.count, provider == .google ? 1 : provider == .bing ? 2 : 3)
                 let error = WebTranslationError.httpStatus(provider, status)
                 XCTAssertFalse(error.diagnosticFields.contains("SENTINEL_INPUT_SECRET"))
                 XCTAssertFalse(error.localizedDescription.contains("SENTINEL_INPUT_SECRET"))
@@ -242,7 +293,7 @@ final class WebTranslationTests: XCTestCase {
             var plan = success(provider); plan.delay = 0.5
             let (session, fixture) = makeSession(bootstrap(provider) + [plan])
             let engine = engine(provider, session: session)
-            let count = provider == .google ? 1 : 2
+            let count = provider == .google ? 1 : provider == .bing ? 2 : 3
             let task = Task { try await engine.translate("你好。", from: .chinese, to: .english) }
             try await waitUntil { fixture.requests.count == count }
             task.cancel()
@@ -305,12 +356,17 @@ final class WebTranslationTests: XCTestCase {
         fixtures.append(fixture); sessions.append(session)
         return (session, fixture)
     }
-    private func bootstrap(_ provider: WebTranslationProvider) -> [WebPlan] {
+    private func bootstrap(_ provider: WebTranslationProvider, keys keyResponse: String = WebTranslationTests.keys) -> [WebPlan] {
         switch provider {
         case .google: []
         case .bing: [.text(bingHTML())]
-        case .youdao: [.text(#"{"code":0,"data":{"secretKey":"fixture-sign-key","aesKey":"fixture-aes-key","aesIv":"fixture-aes-iv"}}"#)]
+        case .youdao: [sessionPage(), .text(keyResponse)]
         }
+    }
+    /// The https://fanyi.youdao.com page view that issues the anonymous cookie
+    /// the translate endpoint requires.
+    private func sessionPage(cookie: String = "fixture-user@127.0.0.1") -> WebPlan {
+        .text("<html>fixture</html>", headers: ["Set-Cookie": "OUTFOX_SEARCH_USER_ID=\(cookie); Domain=.youdao.com; Path=/"])
     }
     private func success(_ provider: WebTranslationProvider, target: Language = .english) -> WebPlan {
         switch provider {
