@@ -76,6 +76,11 @@ enum AXAttributeResult {
 struct AXFieldAccess {
     var readAttribute: (AXUIElement, String) -> AXAttributeResult
     var parameterized: (AXUIElement, String, CFTypeRef) -> CFTypeRef?
+    /// 携带错误的 parameterized 读取：锚窗读取要按 D-13 区分「宿主不支持」与「读失败」。
+    /// 默认值让既有构造点保持原样（该读取视为宿主不支持）。
+    var parameterizedResult: (AXUIElement, String, CFTypeRef) -> AXAttributeResult = { _, _, _ in
+        .unavailable(.attributeUnsupported)
+    }
     var pid: (AXUIElement) -> pid_t?
     var secureInputActive: () -> Bool
     var enableAccessibility: (AXUIElement) -> Void
@@ -109,6 +114,10 @@ struct AXFieldAccess {
             guard now() < deadline else { return nil }
             return original.parameterized(element, key, parameter)
         }
+        result.parameterizedResult = { element, key, parameter in
+            guard now() < deadline else { return .budgetExhausted }
+            return original.parameterizedResult(element, key, parameter)
+        }
         result.hitTest = { point in
             guard now() < deadline else { return nil }
             return original.hitTest(point)
@@ -140,6 +149,13 @@ struct AXFieldAccess {
                 return AXUIElementCopyParameterizedAttributeValue(element, key as CFString, parameter, &result)
                     == .success ? result : nil
             },
+            parameterizedResult: { element, key, parameter in
+                AXUIElementSetMessagingTimeout(element, messagingTimeout)
+                var result: CFTypeRef?
+                let error = AXUIElementCopyParameterizedAttributeValue(element, key as CFString, parameter, &result)
+                if error == .success, let result { return .value(result) }
+                return .unavailable(error == .success ? .failure : error)
+            },
             pid: { element in
                 var pid: pid_t = 0
                 return AXUIElementGetPid(element, &pid) == .success ? pid : nil
@@ -160,6 +176,30 @@ struct AXFieldAccess {
     }
 }
 
+/// Chromium contenteditable（实测 Obsidian）里 `AXSelectedTextRange` 的偏移按宿主
+/// 自身文本计数，而 `AXValue` 在每个块边界多出换行并保留标记字符——两套坐标系。
+/// 直接按偏移索引 `AXValue` 会把当前句取到光标上方。这里用宿主锚窗做内容锚定，
+/// 把偏移换回 `AXValue` 的 UTF-16 索引；找不到或候选倒退（违反漂移方向）返回 nil，
+/// 由调用方按不可信采样处理（不出卡）。全部单位是 UTF-16 单元。
+enum CaretOffsetMapping {
+    /// 锚窗长度：足以在重复行常见的文档里定位，又不依赖宿主内部改写规则。
+    static let windowLength = 24
+    /// 少于 8 个 UTF-16 单元无法辨识（短句重复多），不做映射。
+    static let minimumAnchorLength = 8
+
+    static func mappedIndex(anchor: String, hostOffset: Int, in text: NSString) -> Int? {
+        guard hostOffset >= minimumAnchorLength, anchor.utf16.count >= minimumAnchorLength else { return nil }
+        let start = max(0, hostOffset - windowLength)
+        guard start <= text.length else { return nil }
+        let found = text.range(of: anchor, options: [], range: NSRange(location: start, length: text.length - start))
+        guard found.location != NSNotFound else { return nil }
+        let mapped = found.location + anchor.utf16.count
+        // 漂移方向单调（AXValue 相对宿主只多不少）：候选落到宿主偏移之前即拒绝。
+        guard mapped >= hostOffset else { return nil }
+        return mapped
+    }
+}
+
 @MainActor
 struct AXFieldReader {
     let access: AXFieldAccess
@@ -168,6 +208,13 @@ struct AXFieldReader {
         let selectedRange: NSRange?
         // nil is an unreadable composition state, never an implicit commit.
         let isComposing: Bool?
+        /// 宿主在 `[r - 24, r)` 的文本（Chromium contenteditable 的两套坐标系，
+        /// 见 `CaretOffsetMapping`）。nil 表示宿主不提供该读取或短锚（沿用报告偏移）。
+        let hostAnchor: String?
+        /// 宿主在光标后一位的字符：映射后的局部甄别材料（读不到时为 nil）。
+        let postCaretCharacter: String?
+        /// 锚窗读取失败（显式错误/预算耗尽/读回空）：宿主偏移不可信，不出卡。
+        let anchorReadFailed: Bool
     }
 
     func safe(_ element: AXUIElement, pid: pid_t) -> Bool {
@@ -270,8 +317,57 @@ struct AXFieldReader {
         if field == nil, let caretX = caret?.midX {
             field = enclosingFieldFrame(element, caretX: caretX, layout: layout)
         }
+        let window = anchorWindow(element, selected: selected)
         return Geometry(anchor: InputAnchor(caretFrame: caret, fieldFrame: field),
-            selectedRange: selected, isComposing: composing)
+            selectedRange: selected, isComposing: composing,
+            hostAnchor: window.hostAnchor, postCaretCharacter: window.postCaretCharacter,
+            anchorReadFailed: window.failed)
+    }
+
+    private struct AnchorWindow {
+        let hostAnchor: String?
+        let postCaretCharacter: String?
+        let failed: Bool
+    }
+
+    /// 锚窗读取（`AXSelectedTextRange` 与 `AXValue` 两套坐标系时的映射原料）：
+    /// 读宿主在 `[max(0, r - 24), r)` 的文本，再读光标后一位字符供局部甄别。
+    /// 分档沿用 D-13——宿主不支持该读取或短锚（r < 8）按「不支持」处理（nil，沿用
+    /// 报告偏移）；显式错误、预算耗尽、读回空按不可信采样（fail-closed，不翻错行）。
+    private func anchorWindow(_ element: AXUIElement, selected: NSRange?) -> AnchorWindow {
+        let none = AnchorWindow(hostAnchor: nil, postCaretCharacter: nil, failed: false)
+        guard let selected, selected.location >= CaretOffsetMapping.minimumAnchorLength else { return none }
+        let caret = selected.location
+        let start = max(0, caret - CaretOffsetMapping.windowLength)
+        guard let parameter = rangeValue(NSRange(location: start, length: caret - start)) else { return none }
+        switch access.parameterizedResult(element, kAXStringForRangeParameterizedAttribute as String, parameter) {
+        case .budgetExhausted:
+            return AnchorWindow(hostAnchor: nil, postCaretCharacter: nil, failed: true)
+        case .unavailable(let error):
+            guard error != .attributeUnsupported, error != .noValue else { return none }
+            return AnchorWindow(hostAnchor: nil, postCaretCharacter: nil, failed: true)
+        case .value(let raw):
+            guard let hostAnchor = raw as? String else {
+                return AnchorWindow(hostAnchor: nil, postCaretCharacter: nil, failed: true)
+            }
+            // 实测 Obsidian 偶发大范围读取返回空：空读（r ≥ 8 > 0）不是「宿主不支持」。
+            guard !hostAnchor.isEmpty else {
+                return AnchorWindow(hostAnchor: nil, postCaretCharacter: nil, failed: true)
+            }
+            guard hostAnchor.utf16.count >= CaretOffsetMapping.minimumAnchorLength else { return none }
+            return AnchorWindow(hostAnchor: hostAnchor,
+                postCaretCharacter: postCaretCharacter(element, caret: caret), failed: false)
+        }
+    }
+
+    /// 光标后一位字符（局部甄别用）。读不到（越界/不支持/错误）就当不可比，
+    /// 不因此关闭采样——D-06 只在可读时要求与 `AXValue[mapped]` 一致。
+    private func postCaretCharacter(_ element: AXUIElement, caret: Int) -> String? {
+        guard let parameter = rangeValue(NSRange(location: caret, length: 1)),
+            case .value(let raw) = access.parameterizedResult(
+                element, kAXStringForRangeParameterizedAttribute as String, parameter),
+            let value = raw as? String, value.utf16.count == 1 else { return nil }
+        return value
     }
 
     /// 输入框矩形兜底：向上找最近的「像输入框」的祖先——矩形有效、与本屏相交、

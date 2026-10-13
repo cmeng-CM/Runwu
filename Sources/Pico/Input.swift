@@ -371,8 +371,26 @@ public struct InputSessionID: Hashable, Sendable {
         let read = reader.text(element)
         guard session == capturedSession, permitsContent(element, app: app) else { return nil }
         guard let text = read ?? ((force || composing) ? "" : nil) else { return nil }
+        guard !geometry.anchorReadFailed else {
+            // 锚窗读取失败（显式错误/预算耗尽/读回空）：宿主偏移不可信，不出卡。
+            invalidateUntrustedSample(geometry, element: element, app: app)
+            return nil
+        }
+        var selectedRange = geometry.selectedRange
+        if let hostAnchor = geometry.hostAnchor, let reported = geometry.selectedRange {
+            // Chromium contenteditable（实测 Obsidian）的宿主偏移与 AXValue 两套
+            // 坐标系：映射回 AXValue 的 UTF-16 索引，再用光标后一位字符局部甄别；
+            // 任一不过按不可信采样处理（宁可不翻，不翻错行）。
+            guard let mapped = CaretOffsetMapping.mappedIndex(
+                anchor: hostAnchor, hostOffset: reported.location, in: text as NSString),
+                postCaretCharacterMatches(geometry.postCaretCharacter, at: mapped, in: text as NSString) else {
+                invalidateUntrustedSample(geometry, element: element, app: app)
+                return nil
+            }
+            selectedRange = NSRange(location: mapped, length: reported.length)
+        }
         let snapshot = TextSnapshot(pid: app.pid, bundleIdentifier: app.bundleID, text: text,
-            selectedRange: geometry.selectedRange, fieldFrame: geometry.anchor.fieldFrame,
+            selectedRange: selectedRange, fieldFrame: geometry.anchor.fieldFrame,
             caretFrame: geometry.anchor.caretFrame, isComposing: composing)
         let point = geometry.anchor.caretFrame ?? geometry.anchor.fieldFrame
         let screen = point.flatMap { rect in NSScreen.screens.first { $0.frame.contains(NSPoint(x: rect.midX, y: rect.midY)) } }
@@ -394,6 +412,24 @@ public struct InputSessionID: Hashable, Sendable {
             lastGoodText: lastGoodText, sourceLanguage: sourceLanguage)
         guard !recovered.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return (recovered, captured.session, captured.screen)
+    }
+
+    /// 不可信采样：与 marked 不可读分支同型——旋转会话、清记账、只发布锚点几何，
+    /// 不出卡（映射对不上时不把宿主偏移当索引翻错行）。
+    private func invalidateUntrustedSample(_ geometry: AXFieldReader.Geometry,
+        element: AXUIElement, app: MonitoredApplication) {
+        invalidateInput()
+        guard focused.map({ CFEqual($0, element) }) == true,
+            currentApplication()?.pid == app.pid else { return }
+        lastAnchor = geometry.anchor
+        onAnchorChanged?(geometry.anchor, session)
+    }
+
+    /// D-06 复核②：宿主在 r 处的字符要求与 `AXValue[mapped]` 一致；不可比时不要求。
+    private func postCaretCharacterMatches(_ character: String?, at index: Int, in text: NSString) -> Bool {
+        guard let character else { return true }
+        guard index >= 0, index < text.length else { return false }
+        return text.substring(with: NSRange(location: index, length: 1)) == character
     }
 
     /// 诊断探针：先报实时链路正在用的锚点几何（卡片摆放就是按它算的）；

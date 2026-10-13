@@ -443,13 +443,89 @@ final class CaretTrackingTests: XCTestCase {
         XCTAssertLessThanOrEqual(fixture.attributeReads, 4, "Expired budget must not keep traversing/read attempts")
         fixture.readCost = 0
         XCTAssertNotNil(monitor.snapshotNow())
+
+        // 锚窗读取同样纳入整次预算：预算恰在锚窗读取前耗尽 → 该读取被拒（未执行），
+        // 采样按不可信处理、不读到 AXValue、不发快照；下一采样恢复。
+        let gated = AXFixture()
+        gated.hostText = gated.text
+        gated.selected = NSRange(location: 8, length: 0)
+        gated.readCost = 0.04
+        // 25 次已计费读取（焦点解析 10 + 几何 15，0.04×25 = 1.00 > 0.98 > 0.04×24）
+        // 之后预算耗尽，恰好落在锚窗读取的尝试上。
+        var gatedAccess = gated.access().bounded(to: 0.98, now: { gated.simulatedTime })
+        var anchorAttempts = 0
+        let attempted = gatedAccess.parameterizedResult
+        gatedAccess.parameterizedResult = { element, key, parameter in
+            anchorAttempts += 1
+            return attempted(element, key, parameter)
+        }
+        let gatedMonitor = AccessibilityMonitor(access: gatedAccess, currentApplication: {
+            MonitoredApplication(pid: gated.pid, bundleID: gated.bundleID)
+        }, screenFrames: { gated.screens })
+        var snapshots = 0, anchors = 0
+        gatedMonitor.onSnapshot = { _, _, _ in snapshots += 1 }
+        gatedMonitor.onAnchorChanged = { _, _ in anchors += 1 }
+        gatedMonitor.readSnapshot()
+        XCTAssertEqual(anchorAttempts, 1, "锚窗读取被尝试且受整次预算约束")
+        XCTAssertEqual(gated.anchorReads, 0, "预算耗尽后锚窗读取不再执行")
+        XCTAssertGreaterThan(gated.parameterizedReads, 0, "光标几何读取先于锚窗读取发生")
+        XCTAssertEqual(gated.contentReads, 0)
+        XCTAssertEqual(snapshots, 0, "预算耗尽于锚窗读取 → 不翻")
+        XCTAssertNil(gatedMonitor.snapshotNow(), "快捷键路径同样不翻")
+        XCTAssertEqual(gated.contentReads, 0)
+        XCTAssertEqual(snapshots, 0)
+        XCTAssertGreaterThan(anchors, 0, "锚点几何已发布")
+        gated.readCost = 0
+        gatedMonitor.readSnapshot()
+        XCTAssertEqual(snapshots, 1, "预算恢复后重新发出采样")
+        let recovered = gatedMonitor.snapshotNow()
+        XCTAssertEqual(recovered?.snapshot.selectedRange?.location, 8, "原生宿主映射到自身偏移")
+        XCTAssertEqual(recovered?.snapshot.text, gated.text)
+        XCTAssertEqual(gated.requestedStringRanges.last, NSRange(location: 8, length: 1), "光标后一位字符按 (r, 1) 读取")
+    }
+
+    /// 宿主无该读取能力（attributeUnsupported/noValue）：不判定、沿用报告偏移的旧行为。
+    func testUnsupportedAnchorReadKeepsReportedOffset() throws {
+        for error in [AXError.attributeUnsupported, .noValue] {
+            let fixture = AXFixture()
+            fixture.selected = NSRange(location: 8, length: 0)
+            fixture.anchorReadResult = .unavailable(error)
+            let monitor = fixture.monitor()
+            var snapshot: TextSnapshot?
+            monitor.onSnapshot = { value, _, _ in snapshot = value }
+            monitor.readSnapshot()
+            XCTAssertGreaterThanOrEqual(fixture.anchorReads, 1, "锚窗读取发生过")
+            XCTAssertEqual(try XCTUnwrap(snapshot, "宿主不支持锚窗读取时不应停止翻译").selectedRange?.location, 8)
+            XCTAssertEqual(monitor.snapshotNow()?.snapshot.selectedRange?.location, 8)
+        }
+    }
+
+    /// 显式错误/预算耗尽/读回空：宿主偏移不可信 → 不发快照（宁可不翻，不翻错行）。
+    func testFailedAnchorReadEmitsNoSnapshot() {
+        for failure in [AXAttributeResult.unavailable(.cannotComplete), .unavailable(.failure),
+            .unavailable(.apiDisabled), .budgetExhausted, .value("" as CFString)] {
+            let fixture = AXFixture()
+            fixture.hostText = fixture.text
+            fixture.selected = NSRange(location: 8, length: 0)
+            fixture.anchorReadResult = failure
+            let monitor = fixture.monitor()
+            var snapshots = 0, anchors = 0
+            monitor.onSnapshot = { _, _, _ in snapshots += 1 }
+            monitor.onAnchorChanged = { _, _ in anchors += 1 }
+            monitor.readSnapshot()
+            XCTAssertEqual(fixture.contentReads, 1, "映射在 AXValue 读回之后判定")
+            XCTAssertEqual(snapshots, 0, "锚窗读取失败 \(failure) 时不出卡")
+            XCTAssertNil(monitor.snapshotNow(), "快捷键路径同样不翻")
+            XCTAssertEqual(snapshots, 0)
+            XCTAssertGreaterThan(anchors, 0, "锚点几何仍发布，跟随不因取句失败停摆")
+        }
     }
 }
 
 /// Real CF AX handles plus injected remote replies exercise the monitor and
 /// reader without contacting processes, granting AX or changing user settings.
 @MainActor
-private final class AXFixture {
+final class AXFixture {
     let pid: pid_t = 700
     let bundleID = "test.input"
     let first = AXUIElementCreateApplication(701), second = AXUIElementCreateApplication(702)
@@ -460,6 +536,14 @@ private final class AXFixture {
     var label: String?
     var errors: [String: AXError] = [:]
     var markedReadResult: AXAttributeResult?
+    /// 宿主文本通道：`AXStringForRange` 按它切片，与 `text`（AXValue）分离——
+    /// Chromium contenteditable 里两者是两套坐标系。nil 表示宿主不提供该读取。
+    var hostText: String?
+    /// 宿主文本读取的注入结果；nil 时按 `hostText` 切片。
+    var anchorReadResult: AXAttributeResult?
+    /// 锚窗（`AXStringForRange`）请求范围、锚窗读取次数与旧 parameterized 变体次数。
+    var requestedStringRanges: [NSRange] = []
+    var anchorReads = 0, parameterizedReads = 0
     var selected = NSRange(location: 5, length: 0), marked: NSRange?
     var direct: NSRect? = NSRect(x: 220, y: 150, width: 1, height: 20)
     var previous: NSRect?, next: NSRect?, marker: NSRect?
@@ -522,6 +606,14 @@ private final class AXFixture {
             if let error = errors[key] { return .unavailable(error) }
             return attribute(element, key).map(AXAttributeResult.value) ?? .unavailable(.attributeUnsupported)
         }, parameterized: { [self] _, key, parameter in
+            if key == kAXStringForRangeParameterizedAttribute as String {
+                guard let range = Self.parseRange(parameter) else { return nil }
+                requestedStringRanges.append(range)
+                if case .value(let value) = hostString(range) { return value }
+                return nil
+            }
+            parameterizedReads += 1
+            simulatedTime += readCost
             if key == "AXBoundsForTextMarkerRange" { return marker.map(Self.rect) }
             if key == kAXBoundsForRangeParameterizedAttribute as String {
                 var range = CFRange()
@@ -531,9 +623,37 @@ private final class AXFixture {
                 return (range.location == selected.location - 1 ? previous : next).map(Self.rect)
             }
             return nil
+        }, parameterizedResult: { [self] _, key, parameter in
+            guard key == kAXStringForRangeParameterizedAttribute as String else {
+                return .unavailable(.attributeUnsupported)
+            }
+            guard let range = Self.parseRange(parameter) else { return .unavailable(.failure) }
+            requestedStringRanges.append(range)
+            return hostString(range)
         }, pid: { [self] in CFEqual($0, foreign) ? 900 : pid },
         secureInputActive: { [self] in secureInput }, enableAccessibility: { _ in },
         hitTest: { [self] _ in hit })
+    }
+    /// 宿主文本读取（Chromium 形态）：按请求的 UTF-16 范围在 `hostText` 上切片；
+    /// 范围越过文本末尾就截断，起始位置越界返回空串（宿主没有更多字符）。
+    /// 计入锚窗读取次数与 `readCost`——锚窗读取和属性读取共用整次预算。
+    func hostString(_ range: NSRange) -> AXAttributeResult {
+        anchorReads += 1
+        simulatedTime += readCost
+        if let result = anchorReadResult { return result }
+        guard let hostText else { return .unavailable(.attributeUnsupported) }
+        let text = hostText as NSString
+        guard range.location >= 0, range.length >= 0 else { return .unavailable(.failure) }
+        guard range.location <= text.length else { return .value("" as CFString) }
+        let length = min(range.length, text.length - range.location)
+        return .value(text.substring(with: NSRange(location: range.location, length: length)) as CFString)
+    }
+    static func parseRange(_ value: CFTypeRef) -> NSRange? {
+        guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range),
+            range.location >= 0, range.length >= 0 else { return nil }
+        return NSRange(location: range.location, length: range.length)
     }
     static func range(_ value: NSRange) -> AXValue {
         var range = CFRange(location: value.location, length: value.length)
