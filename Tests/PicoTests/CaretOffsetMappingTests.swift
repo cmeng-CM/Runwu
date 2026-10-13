@@ -288,4 +288,21 @@ final class CaretOffsetMappingTests: XCTestCase {
             XCTAssertEqual(SentenceExtractor().extractSentence(from: captured)?.text, "供应商进度沟通。")
         }
     }
+
+    /// 甄别两侧共用的空白容忍（D-07，审查探针 P2 形态）：`AXValue[mapped]` 处是空白
+    /// 而宿主 `(r, 1)` 是实义字符——同属两套坐标系对空白的表示法差异，跳过比较、
+    /// 仍按映射出卡（修复前被判「不一致」拒绝、不出卡）。
+    func testValueWhitespaceAtMappedIndexSkipsCorroboration() throws {
+        let fixture = AXFixture()
+        fixture.hostText = "供应商进度沟通。啊后续内容"
+        fixture.text = "供应商进度沟通。\n啊后续内容"
+        fixture.selected = NSRange(location: 8, length: 0)
+        let monitor = fixture.monitor()
+        var snapshot: TextSnapshot?
+        monitor.onSnapshot = { value, _, _ in snapshot = value }
+        monitor.readSnapshot()
+        let captured = try XCTUnwrap(snapshot, "AXValue[mapped] 为空白时不得因此关闭采样")
+        XCTAssertEqual(captured.selectedRange?.location, 8, "映射照常（逐字命中）")
+        XCTAssertEqual(SentenceExtractor().extractSentence(from: captured)?.text, "供应商进度沟通。")
+    }
 }

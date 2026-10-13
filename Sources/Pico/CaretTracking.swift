@@ -242,6 +242,13 @@ enum CaretOffsetMapping {
         return strippedCharacters.contains(scalar)
     }
 
+    /// 单个 UTF-16 单元的字符串是否属于同一去除集合——甄别两侧（宿主后一位字符与
+    /// `AXValue[mapped]`）共用这个判断，空白/标记的形态差异不构成「不一致」的证据。
+    static func isStripped(_ character: String) -> Bool {
+        guard character.utf16.count == 1, let unit = character.utf16.first else { return false }
+        return isStripped(unit)
+    }
+
     /// 去除空白/零宽字符，返回归一化串与「归一化索引 → 原文索引」表（升序）。
     /// 表比归一化串长 1：末尾哨兵（原文长度）供「命中区间末端」还原使用。
     static func whitespaceNormalized(_ text: NSString) -> (normalized: NSString, originals: [Int]) {

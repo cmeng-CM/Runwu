@@ -429,11 +429,18 @@ public struct InputSessionID: Hashable, Sendable {
         onAnchorChanged?(geometry.anchor, session)
     }
 
-    /// D-06 复核②：宿主在 r 处的字符要求与 `AXValue[mapped]` 一致；不可比时不要求。
+    /// D-06 复核②（D-07 空白容忍）：宿主在 r 处的字符要求与 `AXValue[mapped]` 一致；
+    /// 不可比时不要求。任一为空白/零宽形态（两套坐标系对空白的表示法不同，见
+    /// `CaretOffsetMapping.strippedCharacters`）即跳过比较；只有两侧都是实义字符
+    /// 才要求（规范等价）相等——形态差异不构成「不一致」的证据。
     private func postCaretCharacterMatches(_ character: String?, at index: Int, in text: NSString) -> Bool {
         guard let character else { return true }
         guard index >= 0, index < text.length else { return false }
-        return text.substring(with: NSRange(location: index, length: 1)) == character
+        let value = text.substring(with: NSRange(location: index, length: 1))
+        guard !CaretOffsetMapping.isStripped(character), !CaretOffsetMapping.isStripped(value) else {
+            return true
+        }
+        return value == character
     }
 
     /// 诊断探针：先报实时链路正在用的锚点几何（卡片摆放就是按它算的）；
