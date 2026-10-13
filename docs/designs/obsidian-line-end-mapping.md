@@ -38,7 +38,9 @@
 
 2026-10-13 修前映射测试退出 1：20 项中 5 项失败、13 个断言失败；两项指定行尾回归将 54 错映射为 60，取句为空。修后映射测试 20 项、取句测试 19 项均通过，全量 `swift test` 336 项、跳过 1 项固定短句联网探测、0 失败。`README.md` 已补行为变化与真机限制。
 
-无代码范围或实现规则偏离。Release 构建、签名、安装和启动验证由后续构建安装任务执行，当前交付尚未验证这些状态；Obsidian 真机复验由用户完成。
+无代码范围或实现规则偏离。T2 已按源码提交 `6360604b8eba91dd2c291502efc5bf6637d2b1cf` 完成 Release 构建和安装至 `/Applications/润物.app`：构建退出 0，构建及安装包的 `codesign --verify --deep --strict` 均退出 0，新旧指定要求与原 Runwu Local 证书一致。替换前已备份旧应用至 `.build/obsidian-line-end-mapping/previous-installed-20261013T113443Z.app`。构建与安装二进制的 SHA256 均为 `f34574a1362b2a09145ee88f16ede7e5c4120f7e7c89e5716f2fe081cc48b2b1`。
+
+安装核验记录（2026-10-13 19:39）显示新进程 PID `58638`，`debugLogEnabled` 保持 `1`；首次后台启动核验在 10 秒内没有取得启动日志，退出 1。只读进程采样显示主线程停于既有的 `SettingsStore.restoreAPIKeysFromKeychain → KeychainStore.string → SecItemCopyMatching → SecurityServer.decrypt` 路径，状态为 `waiting_keychain_before_startup`。尚未取得 `trusted=true` 启动证据，T2 运行验证未完成；已请求用户解锁并手动处理可能的系统钥匙串提示，未自动操作钥匙串、权限或用户窗口。Obsidian 真机复验仍由用户完成。
 
 ## 已知限制
 
