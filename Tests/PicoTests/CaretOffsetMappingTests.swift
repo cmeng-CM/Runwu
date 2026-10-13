@@ -83,6 +83,60 @@ final class CaretOffsetMappingTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(fixture.anchorReads, 1)
     }
 
+    /// 光标在宿主文本末尾时 `AXStringForRange(r, 1)` 天然取不到后一位字符（越界/错误）：
+    /// 复核②不可比只跳过局部甄别，仍按映射出卡——防「笔记末尾永不翻译」的回归。
+    func testPostCaretReadUnavailableStillMaps() throws {
+        let first = "第一行内容。\n"
+        let padding = String(repeating: "垫片行内容需要足够长。\n", count: 3)
+        let second = "第二行内容。\n"
+        let caretLine = "第三行光标所在"
+
+        // 阶段一：光标在宿主文本末尾（越界，夹具按 hostText 切片返回空串）。
+        let fixture = AXFixture()
+        fixture.hostText = first + padding + second + caretLine
+        fixture.text = first + "\n" + padding + second + caretLine
+        let caret = (fixture.hostText! as NSString).length
+        fixture.selected = NSRange(location: caret, length: 0)
+        let monitor = fixture.monitor()
+        var snapshot: TextSnapshot?
+        monitor.onSnapshot = { value, _, _ in snapshot = value }
+        monitor.readSnapshot()
+        let captured = try XCTUnwrap(snapshot, "文末光标取不到后一位字符时必须照常出卡")
+        XCTAssertEqual(captured.selectedRange?.location, caret + 1,
+            "后一位字符读取不可得只跳过复核②，映射照常")
+        XCTAssertEqual(SentenceExtractor().extractSentence(from: captured)?.text, caretLine)
+        XCTAssertEqual(fixture.requestedStringRanges.last, NSRange(location: caret, length: 1),
+            "后一位字符读取发生过（越界返回空，不可比）")
+
+        // 阶段二：宿主对后一位字符返回显式错误（光标不在末尾）——同样只跳过甄别。
+        let mid = AXFixture()
+        mid.hostText = first + padding + second + caretLine
+        mid.text = first + "\n" + padding + second + caretLine
+        let midCaret = ((first + padding + second) as NSString).length + 1
+        mid.selected = NSRange(location: midCaret, length: 0)
+        var access = mid.access()
+        let inner = access.parameterizedResult
+        var postReads = 0
+        access.parameterizedResult = { element, key, parameter in
+            if key == kAXStringForRangeParameterizedAttribute as String,
+                let range = AXFixture.parseRange(parameter), range.length == 1 {
+                postReads += 1
+                return .unavailable(.cannotComplete)
+            }
+            return inner(element, key, parameter)
+        }
+        let midMonitor = AccessibilityMonitor(access: access, currentApplication: {
+            MonitoredApplication(pid: mid.pid, bundleID: mid.bundleID)
+        }, screenFrames: { mid.screens })
+        var midSnapshot: TextSnapshot?
+        midMonitor.onSnapshot = { value, _, _ in midSnapshot = value }
+        midMonitor.readSnapshot()
+        XCTAssertEqual(postReads, 1, "后一位字符读取被替换为显式错误（复核②确实不可比）")
+        let midCaptured = try XCTUnwrap(midSnapshot, "后一位字符读取出错时不出卡会让文末/出错后永不翻译")
+        XCTAssertEqual(midCaptured.selectedRange?.location, midCaret + 1)
+        XCTAssertEqual(SentenceExtractor().extractSentence(from: midCaptured)?.text, caretLine)
+    }
+
     /// 原生宿主（宿主文本 == AXValue）：映射等于报告偏移，行为不变。
     func testNativeHostAnchorHitsItsOwnOffset() throws {
         let fixture = AXFixture()
