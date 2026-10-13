@@ -14,18 +14,36 @@ public struct InputSessionID: Hashable, Sendable {
 
 @MainActor final class InputDebouncer {
     private var task: Task<Void, Never>?
+    // Diagnostic only: the Task reference outlives its deadline in the existing
+    // implementation, so its presence cannot establish a real pending cancel.
+    private var pendingDiagnosticFields: String?
     var delay: Duration = .milliseconds(450)
-    func submit(_ snapshot: TextSnapshot, action: @escaping @MainActor (TextSnapshot) -> Void) {
+    func submit(_ snapshot: TextSnapshot, session: InputSessionID,
+        action: @escaping @MainActor (TextSnapshot) -> Void) {
+        recordCancellation(reason: .snapshotReplaced)
         task?.cancel()
-        task = Task { [delay] in
+        let fields = InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session)
+        pendingDiagnosticFields = fields
+        let milliseconds = delay.components.seconds * 1000 + delay.components.attoseconds / 1_000_000_000_000_000
+        DiagnosticLog.write("debounce queued \(fields) delayMilliseconds=\(milliseconds)")
+        task = Task { [weak self, delay] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
+            self?.pendingDiagnosticFields = nil
+            DiagnosticLog.write("debounce elapsed \(fields)")
             action(snapshot)
         }
     }
-    func cancel() {
+    func cancel(reason: InputDiagnosticReason = .reset) {
+        recordCancellation(reason: reason)
         task?.cancel()
         task = nil
+    }
+
+    private func recordCancellation(reason: InputDiagnosticReason) {
+        guard let fields = pendingDiagnosticFields else { return }
+        pendingDiagnosticFields = nil
+        DiagnosticLog.write("debounce cancelled reason=\(reason.rawValue) \(fields)")
     }
 }
 
@@ -34,6 +52,7 @@ public struct InputSessionID: Hashable, Sendable {
     private let extractor = SentenceExtractor(), detector = LanguageTextDetector(), debouncer = InputDebouncer()
     private var lastSentence = "", lastSentenceKey = "", session: InputSessionID?
     private var observedSentence: ExtractedSentence?
+    private var diagnosticSuppression: InputDiagnosticReason?
     var isEnabled = true
     var sourceLanguage: Language = .chinese
     var excludedBundleIDs: Set<String> = []
@@ -47,76 +66,101 @@ public struct InputSessionID: Hashable, Sendable {
     }
     var timing: TranslationTiming = .pause {
         didSet {
-            if timing != .pause { debouncer.cancel() }
+            if timing != .pause { debouncer.cancel(reason: .timingChanged) }
         }
     }
     var onSentence: ((String, String, InputSessionID, NSScreen?, TextSnapshot) -> Void)?, onEmpty: (() -> Void)?
     func setSourceLanguage(_ language: Language) {
         sourceLanguage = language
-        reset()
+        reset(reason: .sourceLanguageChanged)
     }
     func handle(_ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?) {
         DiagnosticLog.write(
-            "snapshot received bundle=\(snapshot.bundleIdentifier ?? "unknown") length=\(snapshot.text.count)")
+            "snapshot received bundle=\(snapshot.bundleIdentifier ?? "unknown") length=\(snapshot.text.count)"
+                + " pid=\(session.pid) session=\(session.token.uuidString) composing=\(snapshot.isComposing)"
+                + " utf16Length=\(snapshot.text.utf16.count)"
+                + " selectedStart=\(snapshot.selectedRange?.location ?? -1) selectedLength=\(snapshot.selectedRange?.length ?? -1)")
         logger.info(
             "snapshot received bundle=\(snapshot.bundleIdentifier ?? "unknown", privacy: .public) length=\(snapshot.text.count, privacy: .public)"
         )
-        guard isEnabled else { return }
-        if excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "") {
-            logger.info("snapshot ignored excluded app")
-            reset()
+        guard isEnabled else {
+            recordSuppression(.disabled, snapshot: snapshot, session: session)
             return
         }
-        if let previous = self.session, previous != session { reset() }
+        if excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "") {
+            logger.info("snapshot ignored excluded app")
+            recordSuppression(.excludedApp, snapshot: snapshot, session: session)
+            reset(reason: .excludedApp)
+            return
+        }
+        if let previous = self.session, previous != session { reset(reason: .sessionChanged) }
         self.session = session
         observe(snapshot)
         if snapshot.isComposing {
-            debouncer.cancel()
+            recordSuppression(.composing, snapshot: snapshot, session: session)
+            debouncer.cancel(reason: .composing)
             lastSentence = ""
             lastSentenceKey = ""
             return
         }
         if snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            debouncer.cancel()
+            recordSuppression(.emptyText, snapshot: snapshot, session: session)
+            debouncer.cancel(reason: .emptyText)
             lastSentence = ""
             lastSentenceKey = ""
             onEmpty?()
             return
         }
+        diagnosticSuppression = nil
         switch timing {
         case .pause:
-            debouncer.submit(snapshot) { [weak self] snapshot in
+            debouncer.submit(snapshot, session: session) { [weak self] snapshot in
                 guard let self, self.session == session else { return }
                 self.emit(snapshot, session: session, screen: screen)
             }
         case .completeSentence:
-            debouncer.cancel()
+            debouncer.cancel(reason: .completeSentence)
             if extractor.isComplete(snapshot) {
                 emit(snapshot, session: session, screen: screen)
             }
         case .shortcut:
-            debouncer.cancel()
+            debouncer.cancel(reason: .shortcut)
         }
     }
     func translateNow(_ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?) {
         guard isEnabled else { return }
         guard !snapshot.isComposing, !excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "") else {
             observe(snapshot)
-            debouncer.cancel()
+            let reason: InputDiagnosticReason = snapshot.isComposing ? .composing : .excludedApp
+            recordSuppression(reason, snapshot: snapshot, session: session)
+            debouncer.cancel(reason: reason)
             return
         }
-        if let previous = self.session, previous != session { reset() }
+        if let previous = self.session, previous != session { reset(reason: .sessionChanged) }
         self.session = session
         observe(snapshot)
+        diagnosticSuppression = nil
         emit(snapshot, session: session, screen: screen, force: true)
     }
-    func reset() {
-        debouncer.cancel()
+    func reset(reason: InputDiagnosticReason = .reset) {
+        if let session {
+            DiagnosticLog.write("input coordinator reset reason=\(reason.rawValue)"
+                + " pid=\(session.pid) session=\(session.token.uuidString)")
+        }
+        debouncer.cancel(reason: reason)
         session = nil
         observedSentence = nil
         lastSentence = ""
         lastSentenceKey = ""
         onEmpty?()
+    }
+
+    private func recordSuppression(_ reason: InputDiagnosticReason, snapshot: TextSnapshot,
+        session: InputSessionID) {
+        guard diagnosticSuppression != reason else { return }
+        diagnosticSuppression = reason
+        DiagnosticLog.write("input suppressed reason=\(reason.rawValue) "
+            + InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session))
     }
 
     private func observe(_ snapshot: TextSnapshot) {
@@ -132,17 +176,36 @@ public struct InputSessionID: Hashable, Sendable {
         _ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?, force: Bool = false
     ) {
         guard isEnabled, !snapshot.isComposing, !excludedBundleIDs.contains(snapshot.bundleIdentifier ?? "")
-        else { return }
-        guard let extracted = extractor.extractSentence(from: snapshot) else { return }
+        else {
+            let reason: InputDiagnosticReason = !isEnabled ? .disabled : snapshot.isComposing ? .composing : .excludedApp
+            recordSuppression(reason, snapshot: snapshot, session: session)
+            return
+        }
+        guard let extracted = extractor.extractSentence(from: snapshot) else {
+            DiagnosticLog.write("sentence skipped reason=\(InputDiagnosticReason.extractionEmpty.rawValue) "
+                + InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session)
+                + " utf16Length=\(snapshot.text.utf16.count) selectedStart=\(snapshot.selectedRange?.location ?? -1)")
+            return
+        }
         let sentence = extracted.text
         DiagnosticLog.write(
             "debounce fired sentenceLength=\(sentence.count) source=\(sourceLanguage.rawValue) matches=\(detector.contains(sentence, language: sourceLanguage))")
         logger.info(
             "debounce fired sentenceLength=\(sentence.count, privacy: .public) source=\(self.sourceLanguage.rawValue, privacy: .public) matches=\(self.detector.contains(sentence, language: self.sourceLanguage), privacy: .public)"
         )
-        guard !sentence.isEmpty, detector.contains(sentence, language: sourceLanguage) else { return }
+        guard !sentence.isEmpty, detector.contains(sentence, language: sourceLanguage) else {
+            let reason: InputDiagnosticReason = sentence.isEmpty ? .extractionEmpty : .sourceLanguageMismatch
+            DiagnosticLog.write("sentence skipped reason=\(reason.rawValue) "
+                + InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session))
+            return
+        }
         let sentenceKey = extracted.key(in: session)
-        if !force, sentence == lastSentence, sentenceKey == lastSentenceKey { return }
+        if !force, sentence == lastSentence, sentenceKey == lastSentenceKey {
+            DiagnosticLog.write("sentence skipped reason=\(InputDiagnosticReason.sentenceDeduplicated.rawValue) "
+                + InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session)
+                + " sentenceStart=\(extracted.range.location) sentenceUTF16Length=\(extracted.range.length)")
+            return
+        }
         lastSentence = sentence
         lastSentenceKey = sentenceKey
         onSentence?(sentence, sentenceKey, session, screen, snapshot)
@@ -165,6 +228,14 @@ public struct InputSessionID: Hashable, Sendable {
     private var session = InputSessionID(pid: 0)
     private var lastText: String?, lastGoodText: String?, lastSelectedRange: NSRange?, lastComposing: Bool?
     private var lastAnchor: InputAnchor?
+    // These fields only gate diagnostics. A failed sample may rotate the real
+    // session and reacquire focus every poll; that is not a diagnostic recovery.
+    private var diagnosticCaptureFailure: InputDiagnosticReason?
+    private var diagnosticSampleFields: String?
+    private var diagnosticReadGeneration: UInt = 0
+    private var lastDiagnosticFailure: InputDiagnosticReason?
+    private var lastDiagnosticAppPID: pid_t?, lastDiagnosticBundleID: String?
+    private var lastDiagnosticAnchor: InputAnchor?
     private(set) var isRunning = false
     private(set) var lastExternalApp: (pid: pid_t, bundleID: String)?
 
@@ -201,6 +272,10 @@ public struct InputSessionID: Hashable, Sendable {
     }
 
     func stop() {
+        if application != nil || isRunning {
+            DiagnosticLog.write("input session reset reason=\(InputDiagnosticReason.monitorStopped.rawValue) "
+                + InputDiagnostic.identity(bundle: application?.bundleID, session: session))
+        }
         if let appObserver { NSWorkspace.shared.notificationCenter.removeObserver(appObserver) }
         appObserver = nil
         pollTimer?.invalidate()
@@ -330,21 +405,67 @@ public struct InputSessionID: Hashable, Sendable {
     }
 
     func readSnapshot() {
+        let previousSession = session, previousApplication = application
+        diagnosticReadGeneration &+= 1
+        let diagnosticGeneration = diagnosticReadGeneration
         reader.access.beginRead()
         refreshCurrentFocus()
+        beginDiagnosticCapture()
+        defer {
+            finishDiagnosticCapture(generation: diagnosticGeneration,
+                previousSession: previousSession, previousApplication: previousApplication)
+        }
         _ = capture(force: false)
+    }
+
+    private func beginDiagnosticCapture() {
+        diagnosticCaptureFailure = application == nil ? .applicationUnavailable : .focusUnavailable
+        diagnosticSampleFields = nil
+    }
+
+    private func finishDiagnosticCapture(generation: UInt, previousSession: InputSessionID,
+        previousApplication: MonitoredApplication?) {
+        // A callback can synchronously read the new field. Its outcome is the
+        // current diagnostic state; the superseded outer sample must not replace it.
+        guard generation == diagnosticReadGeneration else { return }
+        let contextChanged = lastDiagnosticAppPID != application?.pid || lastDiagnosticBundleID != application?.bundleID
+        let changed = contextChanged || diagnosticCaptureFailure != lastDiagnosticFailure
+        let fields = InputDiagnostic.identity(bundle: application?.bundleID, session: session)
+        if previousSession != session, diagnosticCaptureFailure == nil || changed {
+            let appChanged = previousApplication?.pid != application?.pid || previousApplication?.bundleID != application?.bundleID
+            let reason = appChanged ? InputDiagnosticReason.applicationChanged : diagnosticCaptureFailure ?? .focusChanged
+            DiagnosticLog.write("input session reset reason=\(reason.rawValue) \(fields)"
+                + " previousSession=\(previousSession.token.uuidString)")
+        }
+        if let reason = diagnosticCaptureFailure, changed {
+            DiagnosticLog.write("input sample blocked reason=\(reason.rawValue) \(fields)"
+                + (diagnosticSampleFields.map { " " + $0 } ?? ""))
+        } else if diagnosticCaptureFailure == nil, let reason = lastDiagnosticFailure, !contextChanged {
+            DiagnosticLog.write("input sample recovered reason=\(reason.rawValue) \(fields)")
+        }
+        lastDiagnosticFailure = diagnosticCaptureFailure
+        lastDiagnosticAppPID = application?.pid
+        lastDiagnosticBundleID = application?.bundleID
     }
 
     private func capture(force: Bool) -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)? {
         guard let app = application, let element = focused else { return nil }
-        guard currentApplication()?.pid == app.pid,
-            let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
-                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames()),
-                requiresExplicitFocus: focusedRequiresExplicitFocus) else {
+        guard currentApplication()?.pid == app.pid else {
+            diagnosticCaptureFailure = .applicationChanged
             setFocused(nil)
             return nil
         }
+        guard let geometry = reader.geometry(element, pid: app.pid, bundleID: app.bundleID,
+                excluded: excludedBundleIDs, layout: InputScreenLayout(frames: screenFrames()),
+                requiresExplicitFocus: focusedRequiresExplicitFocus) else {
+            diagnosticCaptureFailure = .geometryUnavailable
+            setFocused(nil)
+            return nil
+        }
+        diagnosticSampleFields = InputDiagnostic.sample(composing: geometry.isComposing, utf16Length: nil,
+            reported: geometry.selectedRange, mapped: nil)
         guard let composing = geometry.isComposing else {
+            diagnosticCaptureFailure = .compositionUnreadable
             // Reject unreadable marked state before AXValue/shortcut recovery.
             // Rotate request identity and clear dedup even for identical text.
             invalidateInput()
@@ -360,22 +481,34 @@ public struct InputSessionID: Hashable, Sendable {
             lastAnchor = geometry.anchor
             // 几何日志：浮窗摆放按这两个矩形算，宿主报偏/不报时只能靠它定位
             // （只记整数坐标，不含文本）。
-            DiagnosticLog.write(
-                "anchor caret=\(Self.coordinates(geometry.anchor.caretFrame))"
-                    + " field=\(Self.coordinates(geometry.anchor.fieldFrame))")
+            if geometry.anchor != lastDiagnosticAnchor {
+                lastDiagnosticAnchor = geometry.anchor
+                DiagnosticLog.write(
+                    "anchor caret=\(Self.coordinates(geometry.anchor.caretFrame))"
+                        + " field=\(Self.coordinates(geometry.anchor.fieldFrame))")
+            }
             onAnchorChanged?(geometry.anchor, capturedSession)
         }
-        guard session == capturedSession else { return nil }
-        guard permitsContent(element, app: app) else { return nil }
-        if force, composing { return nil }
+        guard session == capturedSession else { diagnosticCaptureFailure = .sessionChanged; return nil }
+        guard permitsContent(element, app: app) else { diagnosticCaptureFailure = .contentQualificationFailed; return nil }
+        if force, composing { diagnosticCaptureFailure = .composing; return nil }
         let read = reader.text(element)
-        guard session == capturedSession, permitsContent(element, app: app) else { return nil }
-        guard let text = read ?? ((force || composing) ? "" : nil) else { return nil }
+        guard session == capturedSession, permitsContent(element, app: app) else {
+            diagnosticCaptureFailure = session == capturedSession ? .contentQualificationFailed : .sessionChanged
+            return nil
+        }
+        guard let text = read ?? ((force || composing) ? "" : nil) else {
+            diagnosticCaptureFailure = .contentUnreadable
+            return nil
+        }
+        diagnosticSampleFields = InputDiagnostic.sample(composing: composing, utf16Length: text.utf16.count,
+            reported: geometry.selectedRange, mapped: nil)
         var selectedRange = geometry.selectedRange
         if let read {
             // 映射只在 `AXValue` 真有值时进行：读不到值（force/组合下的空文本路径）
             // 沿用旧行为，映射不可用不能吞掉快捷键的 lastGoodText 恢复。
             guard !geometry.anchorReadFailed else {
+                diagnosticCaptureFailure = .anchorReadFailed
                 // 锚窗读取失败（显式错误/预算耗尽/读回空）：宿主偏移不可信，不出卡。
                 invalidateUntrustedSample(geometry, element: element, app: app)
                 return nil
@@ -385,8 +518,15 @@ public struct InputSessionID: Hashable, Sendable {
                 // 坐标系：映射回 AXValue 的 UTF-16 索引，再用光标后一位字符局部甄别；
                 // 任一不过按不可信采样处理（宁可不翻，不翻错行）。
                 guard let mapped = CaretOffsetMapping.mappedIndex(
-                    anchor: hostAnchor, hostOffset: reported.location, in: read as NSString),
-                    postCaretCharacterMatches(geometry.postCaretCharacter, at: mapped, in: read as NSString) else {
+                    anchor: hostAnchor, hostOffset: reported.location, in: read as NSString) else {
+                    diagnosticCaptureFailure = .mappingNotFound
+                    invalidateUntrustedSample(geometry, element: element, app: app)
+                    return nil
+                }
+                diagnosticSampleFields = InputDiagnostic.sample(composing: composing, utf16Length: text.utf16.count,
+                    reported: geometry.selectedRange, mapped: NSRange(location: mapped, length: reported.length))
+                guard postCaretCharacterMatches(geometry.postCaretCharacter, at: mapped, in: read as NSString) else {
+                    diagnosticCaptureFailure = .postCaretMismatch
                     invalidateUntrustedSample(geometry, element: element, app: app)
                     return nil
                 }
@@ -404,17 +544,35 @@ public struct InputSessionID: Hashable, Sendable {
         lastText = text
         lastSelectedRange = geometry.selectedRange
         lastComposing = composing
+        diagnosticCaptureFailure = nil
+        if force || changed {
+            DiagnosticLog.write("snapshot captured " + InputDiagnostic.identity(bundle: app.bundleID, session: capturedSession)
+                + " " + InputDiagnostic.sample(composing: composing, utf16Length: text.utf16.count,
+                    reported: geometry.selectedRange, mapped: selectedRange)
+                + " forced=\(force) changed=\(changed)")
+        }
         if !force, changed { onSnapshot?(snapshot, capturedSession, screen) }
         return (snapshot, capturedSession, screen)
     }
 
     func snapshotNow() -> (snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?)? {
+        let previousSession = session, previousApplication = application
+        diagnosticReadGeneration &+= 1
+        let diagnosticGeneration = diagnosticReadGeneration
         reader.access.beginRead()
         refreshCurrentFocus()
+        beginDiagnosticCapture()
+        defer {
+            finishDiagnosticCapture(generation: diagnosticGeneration,
+                previousSession: previousSession, previousApplication: previousApplication)
+        }
         guard let captured = capture(force: true) else { return nil }
         let recovered = ShortcutSnapshotRecovery.resolve(live: captured.snapshot,
             lastGoodText: lastGoodText, sourceLanguage: sourceLanguage)
-        guard !recovered.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard !recovered.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            diagnosticCaptureFailure = .shortcutRecoveryEmpty
+            return nil
+        }
         return (recovered, captured.session, captured.screen)
     }
 

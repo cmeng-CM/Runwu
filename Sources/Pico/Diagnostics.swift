@@ -1,5 +1,36 @@
 import Foundation
 
+/// Input diagnostics accept only closed reasons and metadata already available
+/// to the pipeline. Never reflect text, host anchor windows or AX errors here.
+enum InputDiagnosticReason: String {
+    case applicationChanged = "application_changed", applicationUnavailable = "application_unavailable"
+    case focusChanged = "focus_changed", focusUnavailable = "focus_unavailable"
+    case geometryUnavailable = "geometry_unavailable", compositionUnreadable = "composition_unreadable"
+    case anchorReadFailed = "anchor_read_failed", mappingNotFound = "mapping_not_found"
+    case postCaretMismatch = "post_caret_mismatch", contentUnreadable = "content_unreadable"
+    case contentQualificationFailed = "content_qualification_failed", sessionChanged = "session_changed"
+    case composing, emptyText = "empty_text", timingChanged = "timing_changed"
+    case completeSentence = "complete_sentence", shortcut, reset
+    case sourceLanguageChanged = "source_language_changed", excludedApp = "excluded_app"
+    case snapshotReplaced = "snapshot_replaced", shortcutRecoveryEmpty = "shortcut_recovery_empty"
+    case extractionEmpty = "extraction_empty", sentenceDeduplicated = "sentence_deduplicated"
+    case sourceLanguageMismatch = "source_language_mismatch", disabled, monitorStopped = "monitor_stopped"
+}
+
+enum InputDiagnostic {
+    static func identity(bundle: String?, session: InputSessionID) -> String {
+        "bundle=\(bundle ?? "unknown") pid=\(session.pid) session=\(session.token.uuidString)"
+    }
+
+    /// -1 denotes unavailable metadata; ranges and lengths use UTF-16 units.
+    static func sample(composing: Bool?, utf16Length: Int?, reported: NSRange?, mapped: NSRange?) -> String {
+        "composingReadable=\(composing != nil) composing=\(composing ?? false)"
+            + " utf16Length=\(utf16Length ?? -1)"
+            + " reportedStart=\(reported?.location ?? -1) reportedLength=\(reported?.length ?? -1)"
+            + " mappedStart=\(mapped?.location ?? -1) mappedLength=\(mapped?.length ?? -1)"
+    }
+}
+
 /// Logging has a separate, closed schema from the user-facing error. Service
 /// bodies, model names, endpoint URLs, NSError userInfo and arbitrary error
 /// descriptions can contain input or credentials and must never enter logs.

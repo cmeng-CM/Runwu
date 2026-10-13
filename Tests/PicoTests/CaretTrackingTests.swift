@@ -412,6 +412,8 @@ final class CaretTrackingTests: XCTestCase {
     }
 
     func testReentrantFocusChangeDoesNotEmitOldFieldWithNewSession() {
+        let boundary = "caret diagnostic boundary session=\(UUID().uuidString)"
+        DiagnosticLog.write(boundary)
         let fixture = AXFixture()
         let monitor = fixture.monitor()
         var switched = false, anchors: [InputSessionID] = [], snapshots: [InputSessionID] = []
@@ -429,6 +431,10 @@ final class CaretTrackingTests: XCTestCase {
         XCTAssertNotEqual(anchors[0], anchors[1])
         XCTAssertEqual(snapshots, [anchors[1]])
         XCTAssertEqual(fixture.contentReads, 1)
+        let lines = DiagnosticLog.recentLines()
+        let log = Array(lines.drop { !$0.contains(boundary) }.dropFirst())
+        XCTAssertFalse(log.contains { $0.contains("input sample blocked reason=session_changed") },
+            "A superseded outer sample must not overwrite the valid nested read's diagnostic state")
     }
 
     func testSlowAXSampleStopsBeforeValueAndRecoversOnNextSample() {
@@ -519,6 +525,102 @@ final class CaretTrackingTests: XCTestCase {
             XCTAssertEqual(snapshots, 0)
             XCTAssertGreaterThan(anchors, 0, "锚点几何仍发布，跟随不因取句失败停摆")
         }
+    }
+
+    func testDiagnosticUnreadableCompositionCancelsRecoversAndCanFailAgain() async throws {
+        let boundary = "caret diagnostic boundary session=\(UUID().uuidString)"
+        DiagnosticLog.write(boundary)
+        let fixture = AXFixture(), input = InputCoordinator(), monitor = fixture.monitor()
+        input.delayMilliseconds = 20
+        monitor.onFocusChanged = { input.reset() }
+        monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
+        var emitted = 0
+        input.onSentence = { _, _, _, _, _ in emitted += 1 }
+        monitor.readSnapshot()
+        let reads = fixture.contentReads
+        fixture.markedReadResult = .unavailable(.cannotComplete)
+        for _ in 0..<4 { monitor.readSnapshot() }
+        XCTAssertNil(monitor.snapshotNow())
+        XCTAssertEqual(fixture.contentReads, reads, "Diagnostics must not read text on unknown composition")
+        try await Task.sleep(for: .milliseconds(70))
+        XCTAssertEqual(emitted, 0)
+        fixture.markedReadResult = nil
+        monitor.readSnapshot()
+        try await Task.sleep(for: .milliseconds(70))
+        XCTAssertEqual(emitted, 1, "Trusted identical text/range must still be delivered")
+        fixture.markedReadResult = .budgetExhausted
+        for _ in 0..<3 { monitor.readSnapshot() }
+        let lines = DiagnosticLog.recentLines()
+        let index = try XCTUnwrap(lines.firstIndex { $0.contains(boundary) })
+        let log = Array(lines.dropFirst(index + 1))
+        XCTAssertEqual(log.filter { $0.contains("input sample blocked reason=composition_unreadable") }.count, 2)
+        XCTAssertEqual(log.filter { $0.contains("input session reset reason=composition_unreadable") }.count, 2)
+        XCTAssertEqual(log.filter { $0.contains("input sample recovered reason=composition_unreadable") }.count, 1)
+        XCTAssertEqual(log.filter { $0.contains("debounce cancelled reason=reset") }.count, 1,
+            "The second failure occurs after expiry and must not forge a pending cancel")
+        XCTAssertEqual(log.filter { $0.contains("debounce elapsed") }.count, 1)
+    }
+
+    func testDiagnosticGeometryFailureStaysQuietAcrossFocusReacquisition() throws {
+        let boundary = "caret diagnostic boundary session=\(UUID().uuidString)"
+        DiagnosticLog.write(boundary)
+        let fixture = AXFixture()
+        var access = fixture.access(), roleReads = 0, failGeometry = true
+        let begin = access.beginRead, read = access.readAttribute
+        access.beginRead = { roleReads = 0; begin() }
+        access.readAttribute = { element, key in
+            if key == kAXRoleAttribute as String {
+                roleReads += 1
+                if failGeometry, roleReads == 2 { return .unavailable(.cannotComplete) }
+            }
+            return read(element, key)
+        }
+        let monitor = AccessibilityMonitor(access: access, currentApplication: {
+            MonitoredApplication(pid: fixture.pid, bundleID: fixture.bundleID)
+        }, screenFrames: { fixture.screens })
+        var snapshots = 0
+        monitor.onSnapshot = { _, _, _ in snapshots += 1 }
+        for _ in 0..<4 { monitor.readSnapshot() }
+        XCTAssertEqual(snapshots, 0)
+        XCTAssertEqual(fixture.contentReads, 0)
+        failGeometry = false
+        monitor.readSnapshot()
+        XCTAssertEqual(snapshots, 1)
+        failGeometry = true
+        for _ in 0..<3 { monitor.readSnapshot() }
+        let lines = DiagnosticLog.recentLines()
+        let index = try XCTUnwrap(lines.firstIndex { $0.contains(boundary) })
+        let log = Array(lines.dropFirst(index + 1))
+        XCTAssertEqual(log.filter { $0.contains("input sample blocked reason=geometry_unavailable") }.count, 2)
+        XCTAssertEqual(log.filter { $0.contains("input sample recovered reason=geometry_unavailable") }.count, 1)
+        XCTAssertEqual(log.filter { $0.contains("input session reset reason=geometry_unavailable") }.count, 1,
+            "Initial application acquisition has its own application_changed reason")
+    }
+
+    func testDiagnosticApplicationAndFieldResetsAreDistinct() throws {
+        let boundary = "caret diagnostic boundary session=\(UUID().uuidString)"
+        DiagnosticLog.write(boundary)
+        let fixture = AXFixture()
+        var app: MonitoredApplication? = MonitoredApplication(pid: fixture.pid, bundleID: fixture.bundleID)
+        let monitor = AccessibilityMonitor(access: fixture.access(), currentApplication: { app },
+            screenFrames: { fixture.screens })
+        var sessions: [InputSessionID] = []
+        monitor.onSnapshot = { _, session, _ in sessions.append(session) }
+        monitor.readSnapshot()
+        fixture.focused = fixture.second
+        monitor.readSnapshot()
+        app = MonitoredApplication(pid: fixture.pid, bundleID: "test.changed")
+        monitor.readSnapshot()
+        app = nil
+        monitor.readSnapshot()
+        monitor.readSnapshot()
+        XCTAssertEqual(Set(sessions).count, 3)
+        let lines = DiagnosticLog.recentLines()
+        let index = try XCTUnwrap(lines.firstIndex { $0.contains(boundary) })
+        let log = Array(lines.dropFirst(index + 1))
+        XCTAssertEqual(log.filter { $0.contains("input session reset reason=focus_changed") }.count, 1)
+        XCTAssertEqual(log.filter { $0.contains("input session reset reason=application_changed") }.count, 3)
+        XCTAssertEqual(log.filter { $0.contains("input sample blocked reason=application_unavailable") }.count, 1)
     }
 }
 

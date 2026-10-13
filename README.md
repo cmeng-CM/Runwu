@@ -96,6 +96,8 @@ v0.2.0 翻译卡头部显示「润物 · 生成这份译文的服务」。点击
 
 必要时在「通用」设置生成诊断，提供权限、读取状态和错误类别；诊断不包含输入原文或密钥。不要在公开反馈中粘贴密钥或私人文本。
 
+输入链路诊断可按 `bundle`、`session` 对照：`snapshot captured/received` 显示组合状态、UTF-16 长度与报告/最终选区；`input sample blocked/recovered` 区分组合状态不可读、锚窗读取失败、映射未命中和复核不一致；`debounce queued/cancelled/elapsed` 区分排队、仍待执行时取消和到期，`sentence skipped` 标记空取句或去重。连续同类采样失败只记状态转移，恢复后再失败会重新记录；这些记录用于定位原因，不表示已经修复宿主兼容问题。字段和边界见 [输入链路诊断](docs/designs/obsidian-input-diagnostics.md)。
+
 润物目前不自动更新。到 [GitHub Releases](https://github.com/cmeng-CM/Runwu/releases) 查看版本，下载新 DMG，退出润物，再将新应用拖入 Applications 并替换旧版；随后重新启动。若系统提示安全确认或辅助功能授权失效，按上述首次运行步骤处理。本地源码使用者更新仓库后重新构建。
 
 ## 验证与兼容边界
