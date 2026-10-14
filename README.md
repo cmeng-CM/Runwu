@@ -6,7 +6,7 @@
 
 ## 下载、安装与首次运行
 
-**v0.2.0 支持 Apple Silicon（arm64）、macOS 15 或更高版本**。从 [v0.2.0 发行页](https://github.com/cmeng-CM/Runwu/releases/tag/v0.2.0) 下载 `Runwu-0.2.0.dmg`，打开镜像，将「润物.app」拖到「Applications」链接，推出镜像，再从应用程序目录启动润物。改动与更新注意事项见 [v0.2.0 发行说明](docs/releases/v0.2.0.md)。
+**v0.3.0 支持 Apple Silicon（arm64）、macOS 15 或更高版本**。从 [v0.3.0 发行页](https://github.com/cmeng-CM/Runwu/releases/tag/v0.3.0) 下载 `Runwu-0.3.0.dmg`，打开镜像，将「润物.app」拖到「Applications」链接，推出镜像，再从应用程序目录启动润物。改动与更新注意事项见 [v0.3.0 发行说明](docs/releases/v0.3.0.md)。
 
 当前安装包只有本地 ad-hoc 签名，**没有 Developer ID 签名或 Apple 公证**。若 macOS 提示无法验证开发者，确认下载来源后，在「系统设置 → 隐私与安全性」的安全性区域按系统提示选择「仍要打开」。不要关闭系统整体安全保护。
 
@@ -40,13 +40,13 @@ CODESIGN_IDENTITY='已有签名身份' zsh Scripts/build-app.sh
 
 `Scripts/build-app.sh` 只读取身份、从不创建证书或改动钥匙串信任设置；信任与私钥备份由 `Scripts/setup-signing.sh` 负责，生成时会在 `~/Library/Application Support/Runwu/signing/` 留一份 p12 私钥备份（请移到密码管理器或加密备份，不要进仓库、不要放同步盘）。签名身份一旦更换（私钥丢失后重建同名新证书也算），所有用户的辅助功能授权与登录项都会重置。
 
-当前源码构建和 v0.2.0 发行包的显示版本为 `0.2.0`，内部构建号为 `3`。启动时只显示菜单栏；通过菜单栏「设置」或 SwiftUI 的设置入口（`⌘,`）打开设置后显示 Dock，全部设置窗口关闭后隐藏 Dock。菜单栏入口的设置窗口最小化后仍保留 Dock，再从菜单栏打开设置或点击 Dock 图标可恢复原窗口；SwiftUI 设置入口保留系统固有窗口能力，不新增最小化能力。翻译卡、欢迎和授权提示不会使 Dock 常驻。这些 Dock 调整已包含于 v0.2.0；历史 `润物-0.1.0.dmg` 保持原内容。
+当前源码的显示版本为 `0.3.0`，内部构建号为 `4`；v0.3.0 发行包沿用这组版本标识。启动时只显示菜单栏；通过菜单栏「设置」或 SwiftUI 的设置入口（`⌘,`）打开设置后显示 Dock，全部设置窗口关闭后隐藏 Dock。菜单栏入口的设置窗口最小化后仍保留 Dock，再从菜单栏打开设置或点击 Dock 图标可恢复原窗口；SwiftUI 设置入口保留系统固有窗口能力，不新增最小化能力。翻译卡、欢迎和授权提示不会使 Dock 常驻。这些 Dock 调整已包含于 v0.2.0；历史 `润物-0.1.0.dmg` 保持原内容。
 
-DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建应用，强制 ad-hoc 签名，不使用继承的 `CODESIGN_IDENTITY` 或 `NOTARY_PROFILE` 执行开发者签名或公证。输出 `dist/润物-0.2.0.dmg`，GitHub 附件使用同一字节的 `Runwu-0.2.0.dmg`，包含应用和 Applications 链接，创建、校验成功后才替换旧文件。脚本可从其他工作目录通过绝对路径运行，不创建证书、不安装或启动应用。发行包固定 ad-hoc 意味着别人下载后首次放行一次、每次升级也会重新要求授权；若要让用户的授权跨版本保留，可把这里的身份改成同一张自签证书（别人机器上仍会看到「未验证开发者」，唯一的彻底解法是付费 Developer ID 加公证）。
+DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建应用，强制 ad-hoc 签名，不使用继承的 `CODESIGN_IDENTITY` 或 `NOTARY_PROFILE` 执行开发者签名或公证。输出 `dist/润物-0.3.0.dmg`，GitHub 附件使用同一字节的 `Runwu-0.3.0.dmg`，包含应用和 Applications 链接，创建、校验成功后才替换旧文件。脚本可从其他工作目录通过绝对路径运行，不创建证书、不安装或启动应用。发行包固定 ad-hoc 意味着别人下载后首次放行一次、每次升级也会重新要求授权；若要让用户的授权跨版本保留，可把这里的身份改成同一张自签证书（别人机器上仍会看到「未验证开发者」，唯一的彻底解法是付费 Developer ID 加公证）。
 
 ## 输入、位置与显式操作
 
-在「翻译」设置选择源语言、目标语言和服务。默认中文 → 英文，约 450ms 停顿后翻译当前句子，也可选择完整句子或快捷键触发；快捷键可在设置中录制，以当前配置为准。输入后查看浮窗的原文与译文，中文输入法候选尚未上屏时等待提交。输入框、应用或当前句子改变后，旧请求不能覆盖新句子。重复句子按实际 UTF-16 范围区分，包含 emoji 的文本也按真实范围处理。Chromium 系文档编辑器（实测 Obsidian）把宿主偏移与 `AXValue` 文本报成两套坐标系，润物先读宿主锚窗、把偏移映射回文本后再取句（锚窗匹配对空白形态——零宽空格/制表符/换行——容忍：逐字找不到时按去空白归一化匹配并还原原文索引，甄别遇空白跳过）；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；这类宿主上「替换原文」在偏移映射生效时只会按映射后的正确范围替换，或按既有门槛被拒绝，不会再替换错行；映射未发生时（宿主不提供该读取或不足 8 个 UTF-16 单元）仍可能按报告偏移错行替换。
+在「翻译」设置选择源语言、目标语言和服务。默认中文 → 英文，约 450ms 停顿后翻译当前句子，也可选择完整句子或快捷键触发；快捷键可在设置中录制，以当前配置为准。输入后查看浮窗的原文与译文，中文输入法候选尚未上屏时等待提交。输入框、应用或当前句子改变后，旧请求不能覆盖新句子。重复句子按实际 UTF-16 范围区分，包含 emoji 的文本也按真实范围处理。Chromium 系文档编辑器（实测 Obsidian）把宿主偏移与 `AXValue` 文本报成两套坐标系，润物先读宿主锚窗、把偏移映射回文本后再取句（锚窗匹配对空白形态——零宽空格/制表符/换行——容忍：逐字找不到时按去空白归一化匹配并还原原文索引，甄别遇空白跳过）；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；这类宿主上「替换原文」在偏移映射正确时按对应范围替换，或按既有门槛被拒绝；重复锚或重复行且后一位字符相同时仍有错配风险。映射未发生时（宿主不提供该读取或不足 8 个 UTF-16 单元）仍可能按报告偏移错行替换。
 
 文字行尾后有连续空行时，归一化映射保留最后匹配字符之后的插入位置，当前句不会因映射越过空行而变空；行尾前移一字时，映射也只前移一字。锚窗本身以空白或零宽字符结束时仍沿用旧边界策略，不推断空白行归属。用户已于 2026-10-14 确认此次 Obsidian 行尾问题复验通过；该反馈不代表其它输入、布局或宿主场景全部通过。机制与合成回归见 [Obsidian 行尾映射修复](docs/designs/obsidian-line-end-mapping.md)。
 
@@ -91,7 +91,7 @@ v0.2.0 翻译卡头部显示「润物 · 生成这份译文的服务」。点击
 | 输入后没有浮窗 | 确认菜单栏未暂停、辅助功能已授权、当前应用不在排除列表、源语言匹配；完整句子/快捷键模式需满足对应触发条件。密码框和某些宿主不支持读取 |
 | 浮窗不跟随或暂时消失 | 宿主可能不提供文字或输入框几何；尝试关闭跟随、使用固定位置或剪贴板翻译，并检查自动隐藏设置 |
 | 浮窗压住输入框 | 宿主报告的输入框或光标位置不准（例如把光标报在输入行之外）；跟随卡已按输入框整体避让，仍被压住时可在「通用」设置生成诊断报告，其中的 `probe` 行会显示宿主是否报告输入框矩形与光标是否落在框内；整屏编辑器宿主卡片贴光标行、可能压住正文其它行 |
-| 卡片取句不是光标所在句 | Chromium 系文档编辑器（实测 Obsidian）的宿主偏移与文本是两套坐标系，润物按宿主锚窗映射后再取句；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；此类宿主上「替换原文」在映射生效时只会按正确范围替换、或按既有门槛被拒绝（映射未发生时仍可能按报告偏移错行替换） |
+| 卡片取句不是光标所在句 | Chromium 系文档编辑器（实测 Obsidian）的宿主偏移与文本是两套坐标系，润物按宿主锚窗映射后再取句；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；此类宿主上「替换原文」在映射正确时按对应范围替换、或按既有门槛被拒绝；重复锚或重复行且后一位字符相同时仍有错配风险（映射未发生时仍可能按报告偏移错行替换） |
 | 苹果本地服务不可用 | 在翻译设置准备当前语言方向的语言包，等待准备完成；首次下载需要网络 |
 | 网页服务失败 | 查看菜单栏的失败提示，检查网络，稍后重试或切换服务；服务可能限流或改变协议 |
 | 自定义模型失败 | 检查端点、模型名、密钥、启用状态及超时；确认端点兼容所选提供商协议和选项 |
@@ -104,19 +104,21 @@ v0.2.0 翻译卡头部显示「润物 · 生成这份译文的服务」。点击
 
 ## 验证与兼容边界
 
-2026-10-14 用户确认此次 Obsidian 问题复验通过后，已生成包含修复的本地 [润物-0.2.0.dmg](dist/润物-0.2.0.dmg)，版本仍为 `0.2.0`、构建号 `3`。DMG 沿用标准 ad-hoc 签名、未公证；构建、镜像校验、只读挂载内容检查与严格签名通过，内含应用、Applications 链接及 LICENSE，文件 SHA256 为 `f67de84f65c45c279cddea5dbfe9853ec9fd67874eb5588c8137a6cdc545c992`。本机安装随后沿用原 Runwu Local 固定身份重建，构建/安装二进制 SHA256 均为 `0126fe866dc54dddbe329189e150fb49384a9ec4d31d1e9daead824c80be345d`，严格签名通过、指定要求保持；PID `42653` 的启动日志确认 `trusted=true enabled=true` 和辅助功能监控启动，`debugLogEnabled` 保持 `1`。两种产物的签名政策不同，各自与对应输入核对摘要；本轮未推送或发布远程附件，历史 0.1.0 DMG 保持。完整交付与限制见 [行尾映射增量设计](docs/designs/obsidian-line-end-mapping.md)。
+以下按日期保留的测试、0.2.0/build 3 本地 DMG 与固定身份安装记录属于升级版本前的历史核验，不是 v0.3.0 发行附件的最终校验。v0.3.0 的发布验证与下载摘要见 [发行说明](docs/releases/v0.3.0.md)；旧 [v0.2.0 发行说明](docs/releases/v0.2.0.md) 和已发布附件保持。
+
+历史本地交付（2026-10-14）：用户确认此次 Obsidian 问题复验通过后，已生成包含修复的本地 [润物-0.2.0.dmg](dist/润物-0.2.0.dmg)，版本仍为 `0.2.0`、构建号 `3`。DMG 沿用标准 ad-hoc 签名、未公证；构建、镜像校验、只读挂载内容检查与严格签名通过，内含应用、Applications 链接及 LICENSE，文件 SHA256 为 `f67de84f65c45c279cddea5dbfe9853ec9fd67874eb5588c8137a6cdc545c992`。本机安装随后沿用原 Runwu Local 固定身份重建，构建/安装二进制 SHA256 均为 `0126fe866dc54dddbe329189e150fb49384a9ec4d31d1e9daead824c80be345d`，严格签名通过、指定要求保持；PID `42653` 的启动日志确认 `trusted=true enabled=true` 和辅助功能监控启动，`debugLogEnabled` 保持 `1`。两种产物的签名政策不同，各自与对应输入核对摘要；本轮未推送或发布远程附件，历史 0.1.0 DMG 保持。完整交付与限制见 [行尾映射增量设计](docs/designs/obsidian-line-end-mapping.md)。
 
 2026-10-13 行尾增量修复后全量共 336 项，其中 1 项联网探测默认跳过，0 项失败。新增 7 项映射回归覆盖行尾后六个换行、文末尾随空行、前移一字、emoji/组合字符的 UTF-16 边界、文末哨兵、锚尾去除字符的旧策略及首个正确候选倒退时拒绝；均通过宿主夹具到监控快照验证，实义行尾再经生产取句器确认当前句。旧实现先跑出 5 项失败、13 个断言失败，修复后 20 项映射测试与 19 项取句测试均通过。用户 2026-10-14 回复「测试了，没问题，收尾打包安装吧」，确认此次 Obsidian 行尾问题真机复验通过；该反馈与这些合成测试均不代表全部宿主或全部输入、布局场景已验证。
 
-2026-10-13 当前源码全量共 317 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）宿主偏移与 `AXValue` 两套坐标系导致的取句偏上问题：先读宿主锚窗把偏移映射回 `AXValue` 文本再取句，映射配方向守卫（候选不得倒退）与光标后一位字符甄别，校验失败或读取出错时不翻（宁可不翻，不翻错行），宿主不提供该读取能力时沿用报告偏移；首版在真实宿主因空白表示法差异常不出卡（宿主用零宽空格+制表符表示块边界、`AXValue` 用换行，逐字锚窗找不到即不翻），已改为对空白形态容忍的映射——逐字失败时按去空白归一化匹配并还原原文索引（归一化锚不足 8 个非空白单元仍不匹配），甄别遇空白跳过；新增回归用例 testBlockBoundaryValueMapsToTheCaretLine、testUnmatchableAnchorEmitsNoSnapshot、testCandidateBeforeHostOffsetIsRejected、testPostCaretCharacterMismatchIsRejected、testPostCaretReadUnavailableStillMaps、testNativeHostAnchorHitsItsOwnOffset、testAnchorWindowLengthBoundAtDocumentStart、testUnsupportedAnchorReadKeepsReportedOffset、testFailedAnchorReadEmitsNoSnapshot、testCanonicallyEquivalentAnchorUsesFoundLength、testUnreadableValueWithReadableAnchorStillRecoversLastGoodText、testWhitespaceVariantAnchorStillMaps、testWhitespaceOnlyMatchIsRejected、testPostCaretWhitespaceSkipsCorroboration、testValueWhitespaceAtMappedIndexSkipsCorroboration。
+2026-10-13 当次源码全量共 317 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）宿主偏移与 `AXValue` 两套坐标系导致的取句偏上问题：先读宿主锚窗把偏移映射回 `AXValue` 文本再取句，映射配方向守卫（候选不得倒退）与光标后一位字符甄别，校验失败或读取出错时不翻（宁可不翻，不翻错行），宿主不提供该读取能力时沿用报告偏移；首版在真实宿主因空白表示法差异常不出卡（宿主用零宽空格+制表符表示块边界、`AXValue` 用换行，逐字锚窗找不到即不翻），已改为对空白形态容忍的映射——逐字失败时按去空白归一化匹配并还原原文索引（归一化锚不足 8 个非空白单元仍不匹配），甄别遇空白跳过；新增回归用例 testBlockBoundaryValueMapsToTheCaretLine、testUnmatchableAnchorEmitsNoSnapshot、testCandidateBeforeHostOffsetIsRejected、testPostCaretCharacterMismatchIsRejected、testPostCaretReadUnavailableStillMaps、testNativeHostAnchorHitsItsOwnOffset、testAnchorWindowLengthBoundAtDocumentStart、testUnsupportedAnchorReadKeepsReportedOffset、testFailedAnchorReadEmitsNoSnapshot、testCanonicallyEquivalentAnchorUsesFoundLength、testUnreadableValueWithReadableAnchorStillRecoversLastGoodText、testWhitespaceVariantAnchorStillMaps、testWhitespaceOnlyMatchIsRejected、testPostCaretWhitespaceSkipsCorroboration、testValueWhitespaceAtMappedIndexSkipsCorroboration。
 
-2026-10-13 当前源码全量共 302 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）把整个编辑器报成一个输入框（89% 屏高）时跟随卡贴屏幕顶缘、飘出焦点窗口的问题：高度超过所在屏 0.6 倍的输入框矩形不再作为跟随避让障碍、卡片贴光标行落下，恰为 0.6 倍及以下仍按既有规则避让（由 0.6 门槛边界用例 testFollowingCardKeepsAFieldAtExactlyTheHeightLimit 锁定）；新增回归用例 testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen；≤0.6 屏高输入框行为不变由终审 17 夹具×多高度扫描单测核验，输出与基线逐字一致。
+2026-10-13 当次源码全量共 302 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）把整个编辑器报成一个输入框（89% 屏高）时跟随卡贴屏幕顶缘、飘出焦点窗口的问题：高度超过所在屏 0.6 倍的输入框矩形不再作为跟随避让障碍、卡片贴光标行落下，恰为 0.6 倍及以下仍按既有规则避让（由 0.6 门槛边界用例 testFollowingCardKeepsAFieldAtExactlyTheHeightLimit 锁定）；新增回归用例 testFollowingCardHugsTheCaretWhenTheFieldFillsTheScreen；≤0.6 屏高输入框行为不变由终审 17 夹具×多高度扫描单测核验，输出与基线逐字一致。
 
-2026-10-12 当前源码全量共 300 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复有道适配器被 code50 拒绝的问题：按当前网页协议先取匿名会话 cookie、补全签名握手与翻译请求字段，cookie 被拒时重取会话并重试一次；新增会话复用、失效重试、重试上限与无 cookie 握手失败四组夹具。release 构建与 `codesign --verify --deep --strict 润物.app` 通过（Runwu Local 身份）。
+2026-10-12 当次源码全量共 300 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复有道适配器被 code50 拒绝的问题：按当前网页协议先取匿名会话 cookie、补全签名握手与翻译请求字段，cookie 被拒时重取会话并重试一次；新增会话复用、失效重试、重试上限与无 cookie 握手失败四组夹具。release 构建与 `codesign --verify --deep --strict 润物.app` 通过（Runwu Local 身份）。
 
-2026-10-10 当前源码全量共 296 项，其中 1 项联网探测默认跳过，0 项失败；本轮新增浮窗避让输入框的布局单测与协调器回归（含宿主把光标框报在输入行之外的复现场景、翻面死区、固定卡整组让开与回位、空隙不相交不挪位、无干净位置回退、输入框矩形祖先兜底、面板高度不短于实测文本、诊断探针几何格式）。
+2026-10-10 当次源码全量共 296 项，其中 1 项联网探测默认跳过，0 项失败；本轮新增浮窗避让输入框的布局单测与协调器回归（含宿主把光标框报在输入行之外的复现场景、翻面死区、固定卡整组让开与回位、空隙不相交不挪位、无干净位置回退、输入框矩形祖先兜底、面板高度不短于实测文本、诊断探针几何格式）。
 
-2026-10-09 当前源码全量共 278 项，其中 1 项联网探测默认跳过，0 项失败；本轮包含设置窗口的原生生命周期回归与独立应用 policy 实测、服务菜单及重译的隔离原生交互、输入资格的合成红绿回归，以及加载/失败长卡的原生窗口缩放预算回归；不下载苹果语言包。release 构建和严格签名验证通过，留下本地 ad-hoc 签名的 `润物.app`。
+2026-10-09 当次源码全量共 278 项，其中 1 项联网探测默认跳过，0 项失败；本轮包含设置窗口的原生生命周期回归与独立应用 policy 实测、服务菜单及重译的隔离原生交互、输入资格的合成红绿回归，以及加载/失败长卡的原生窗口缩放预算回归；不下载苹果语言包。release 构建和严格签名验证通过，留下本地 ad-hoc 签名的 `润物.app`。
 
 自动化测试覆盖输入会话、组合提交、真实句子范围、多屏坐标、浮窗跟随与固定/钉住行为、两种输入来源的路由和取消、配置隔离、明确只读/禁用/后代焦点、资格失效后的读取与替换保护，以及三家网页 HTTP 夹具。SwiftUI host 回归使用真实 NSHostingView 和生产配置 generation 包装，但不下载语言包或伪造苹果原生翻译 session。
 
