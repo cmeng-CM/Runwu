@@ -42,11 +42,23 @@
 
 首次安装核验记录（2026-10-13 19:39）显示新进程 PID `58638`，`debugLogEnabled` 保持 `1`；后台启动核验在 10 秒内没有取得启动日志，退出 1。只读进程采样显示主线程停于既有的 `SettingsStore.restoreAPIKeysFromKeychain → KeychainStore.string → SecItemCopyMatching → SecurityServer.decrypt` 路径，当时状态为 `waiting_keychain_before_startup`。当时尚无 `trusted=true` 启动证据，已请求用户解锁并手动处理可能的系统钥匙串提示，未自动操作钥匙串、权限或用户窗口。
 
-用户明确回复已处理后，2026-10-13 20:04 最终核验取得 `2026-10-13T12:02:49.878Z startup trusted=true enabled=true` 和 `2026-10-13T12:02:49.909Z accessibility monitor started` 日志；PID `58638` 仍运行，`debugLogEnabled` 仍为 `1`。构建/安装 SHA256、严格签名和原指定要求再次核对通过，状态更新为 `trusted_startup_and_monitor_confirmed`，T2 运行核验通过，无需再次安装或重启。初次钥匙串等待记录保留；Obsidian 真机输入和浮窗显示仍待用户复验。
+用户明确回复已处理后，2026-10-13 20:04 最终核验取得 `2026-10-13T12:02:49.878Z startup trusted=true enabled=true` 和 `2026-10-13T12:02:49.909Z accessibility monitor started` 日志；PID `58638` 仍运行，`debugLogEnabled` 仍为 `1`。构建/安装 SHA256、严格签名和原指定要求再次核对通过，状态更新为 `trusted_startup_and_monitor_confirmed`，T2 运行核验通过，无需再次安装或重启。初次钥匙串等待记录保留；次日的用户真机反馈及最终打包安装记录如下。
+
+2026-10-14 用户回复「测试了，没问题，收尾打包安装吧」，确认此次 Obsidian 输入与行尾浮窗问题复验通过；该反馈不表示全部输入、布局或宿主场景均已验证。T3 打包时 HEAD 为 `a9a9458876ae618e6348c33e4dd67bbd21d16ad5`，功能源码仍与已审查的 `6360604` 一致，版本保持 `0.2.0`、构建号 `3`。
+
+| 最终交付 | 实测记录 |
+|----------|----------|
+| 标准 DMG | `dist/润物-0.2.0.dmg`，3076244 字节，SHA256 `f67de84f65c45c279cddea5dbfe9853ec9fd67874eb5588c8137a6cdc545c992`。`Scripts/build-dmg.sh` 和 `hdiutil verify` 均退出 0，只读挂载检查通过并已卸载；镜像含 `润物.app`、指向 `/Applications` 的 Applications 符号链接与 LICENSE，标准 ad-hoc 签名、未公证，严格签名通过。 |
+| 镜像内应用 | 镜像内与打包输入二进制 SHA256 均为 `debc31f18c96d35e6e9b61011312a00ec9e5cd21a8d587cdd6238b43ab278a60`；按 ad-hoc 签名产物各自核对，不与固定身份安装版比较完整签名摘要。 |
+| 本机固定身份安装 | DMG 完成后以原 Runwu Local 身份运行 `Scripts/build-app.sh`，退出 0；构建/安装二进制 SHA256 均为 `0126fe866dc54dddbe329189e150fb49384a9ec4d31d1e9daead824c80be345d`，严格签名通过，指定要求仍为原证书与 `com.comeg.runwu`。 |
+| 最终安装运行 | 只停止精确应用路径的旧 PID `58638` 后后台启动，新 PID `42653`；`2026-10-14T00:48:41.976Z startup trusted=true enabled=true`、`2026-10-14T00:48:41.999Z accessibility monitor started`，`debugLogEnabled` 前后均为 `1`。没有改钥匙串、权限或其它配置，没有激活用户窗口。 |
+| 备份与源码一致性 | 旧 0.2.0 DMG 备份为 `.build/obsidian-line-end-mapping/previous-dmg-20261014T004741Z.dmg`，旧安装备份为 `.build/obsidian-line-end-mapping/final-closeout-previous-installed-20261014T004841Z.app`。重新签名使完整二进制摘要变化；仅在临时副本移除签名后，用户已测试与最终安装的可执行文件 SHA256 均为 `f4c98c47d21b96e0438edc6a3520e21f137bbe1be22596db4df501b6c2d189f5`，未修改构建或安装应用。历史 0.1.0 DMG 保持。 |
+
+本轮正式改动与产物均留在本地，未推送或发布远程附件。原 `caret-offset-mapping` 工作流的 T5（无可信光标框且只剩被丢弃的整屏矩形时暂隐）仍为 pending，未在本次修复或用户反馈中计为完成。
 
 ## 已知限制
 
-合成回归不能代替用户真机复验；本次未读取现场正文或操作 Obsidian 窗口。短锚、匹配失败、方向不满足仍按旧规则；锚尾去除字符沿用旧边界策略，不宣称解决空白行光标归属。原 T5 光标框丢失后的布局调整未实施，取句、翻译、去重和防抖行为保持。
+用户已确认此次 Obsidian 问题真机复验通过；合成回归和该反馈不代表全部输入、布局或宿主场景验证。本次未读取现场正文或操作 Obsidian 窗口。短锚、匹配失败、方向不满足仍按旧规则；锚尾去除字符沿用旧边界策略，不宣称解决空白行光标归属。原 T5 光标框丢失后的布局调整未实施，取句、翻译、去重和防抖行为保持。
 
 ## 验收标准
 
@@ -62,6 +74,7 @@
 | D-02 | 用户授权通过后重建安装；沿用旧签名权限，只后台重启润物。 |
 | D-03 | 锚尾实义单元用最后命中单元后边界，锚尾去除字符沿用旧策略；只改可确定插入位置，既有防护保持。 |
 | D-04 | README 记录行为变化，本增量设计记录交付与限制；原整体设计范围更大，相关机制以本文件修正为准。 |
+| D-05 | 用户 2026-10-14 回复「测试了，没问题，收尾打包安装吧」；记录此次问题复验通过，按既有标准生成 ad-hoc DMG，本机安装沿用 Runwu Local 固定身份，不改变版本、源码或设置。 |
 
 ## 接口与数据形状
 

@@ -48,7 +48,7 @@ DMG 脚本使用系统 `hdiutil`，不需要 `create-dmg`；每次重新构建�
 
 在「翻译」设置选择源语言、目标语言和服务。默认中文 → 英文，约 450ms 停顿后翻译当前句子，也可选择完整句子或快捷键触发；快捷键可在设置中录制，以当前配置为准。输入后查看浮窗的原文与译文，中文输入法候选尚未上屏时等待提交。输入框、应用或当前句子改变后，旧请求不能覆盖新句子。重复句子按实际 UTF-16 范围区分，包含 emoji 的文本也按真实范围处理。Chromium 系文档编辑器（实测 Obsidian）把宿主偏移与 `AXValue` 文本报成两套坐标系，润物先读宿主锚窗、把偏移映射回文本后再取句（锚窗匹配对空白形态——零宽空格/制表符/换行——容忍：逐字找不到时按去空白归一化匹配并还原原文索引，甄别遇空白跳过）；锚窗找不到、甄别不一致或读取出错时不出卡（宁可不翻，不翻错行），宿主不提供该读取能力时沿用既有行为；这类宿主上「替换原文」在偏移映射生效时只会按映射后的正确范围替换，或按既有门槛被拒绝，不会再替换错行；映射未发生时（宿主不提供该读取或不足 8 个 UTF-16 单元）仍可能按报告偏移错行替换。
 
-文字行尾后有连续空行时，归一化映射保留最后匹配字符之后的插入位置，当前句不会因映射越过空行而变空；行尾前移一字时，映射也只前移一字。锚窗本身以空白或零宽字符结束时仍沿用旧边界策略，不推断空白行归属；真机输入与浮窗显示仍需使用验证。机制与合成回归见 [Obsidian 行尾映射修复](docs/designs/obsidian-line-end-mapping.md)。
+文字行尾后有连续空行时，归一化映射保留最后匹配字符之后的插入位置，当前句不会因映射越过空行而变空；行尾前移一字时，映射也只前移一字。锚窗本身以空白或零宽字符结束时仍沿用旧边界策略，不推断空白行归属。用户已于 2026-10-14 确认此次 Obsidian 行尾问题复验通过；该反馈不代表其它输入、布局或宿主场景全部通过。机制与合成回归见 [Obsidian 行尾映射修复](docs/designs/obsidian-line-end-mapping.md)。
 
 v0.2.0 会在读取正文前检查焦点和编辑资格：明确只读、禁用的控件及未聚焦的列表文本不会触发输入翻译，Finder 式目录列表的合成回归已通过；搜索、重命名等真正的输入框仍保留支持。原焦点的标准原生文本控件未提供可选编辑元数据时保持既有兼容，因此不能保证识别所有未标明只读的宿主。尚未访问真实 Finder 输入树或实机点击验证，遇到不兼容应用可使用排除设置或剪贴板翻译。当前句仍按光标位置和原有标点规则提取，不新增“必须键入才翻译”的限制。
 
@@ -104,7 +104,9 @@ v0.2.0 翻译卡头部显示「润物 · 生成这份译文的服务」。点击
 
 ## 验证与兼容边界
 
-2026-10-13 行尾增量修复后全量共 336 项，其中 1 项联网探测默认跳过，0 项失败。新增 7 项映射回归覆盖行尾后六个换行、文末尾随空行、前移一字、emoji/组合字符的 UTF-16 边界、文末哨兵、锚尾去除字符的旧策略及首个正确候选倒退时拒绝；均通过宿主夹具到监控快照验证，实义行尾再经生产取句器确认当前句。旧实现先跑出 5 项失败、13 个断言失败，修复后 20 项映射测试与 19 项取句测试均通过。Obsidian 真机复验尚待用户进行，本记录不代表真机已通过。
+2026-10-14 用户确认此次 Obsidian 问题复验通过后，已生成包含修复的本地 [润物-0.2.0.dmg](dist/润物-0.2.0.dmg)，版本仍为 `0.2.0`、构建号 `3`。DMG 沿用标准 ad-hoc 签名、未公证；构建、镜像校验、只读挂载内容检查与严格签名通过，内含应用、Applications 链接及 LICENSE，文件 SHA256 为 `f67de84f65c45c279cddea5dbfe9853ec9fd67874eb5588c8137a6cdc545c992`。本机安装随后沿用原 Runwu Local 固定身份重建，构建/安装二进制 SHA256 均为 `0126fe866dc54dddbe329189e150fb49384a9ec4d31d1e9daead824c80be345d`，严格签名通过、指定要求保持；PID `42653` 的启动日志确认 `trusted=true enabled=true` 和辅助功能监控启动，`debugLogEnabled` 保持 `1`。两种产物的签名政策不同，各自与对应输入核对摘要；本轮未推送或发布远程附件，历史 0.1.0 DMG 保持。完整交付与限制见 [行尾映射增量设计](docs/designs/obsidian-line-end-mapping.md)。
+
+2026-10-13 行尾增量修复后全量共 336 项，其中 1 项联网探测默认跳过，0 项失败。新增 7 项映射回归覆盖行尾后六个换行、文末尾随空行、前移一字、emoji/组合字符的 UTF-16 边界、文末哨兵、锚尾去除字符的旧策略及首个正确候选倒退时拒绝；均通过宿主夹具到监控快照验证，实义行尾再经生产取句器确认当前句。旧实现先跑出 5 项失败、13 个断言失败，修复后 20 项映射测试与 19 项取句测试均通过。用户 2026-10-14 回复「测试了，没问题，收尾打包安装吧」，确认此次 Obsidian 行尾问题真机复验通过；该反馈与这些合成测试均不代表全部宿主或全部输入、布局场景已验证。
 
 2026-10-13 当前源码全量共 317 项，其中 1 项联网探测默认跳过，0 项失败；本轮修复 Chromium contenteditable 宿主（实测 Obsidian）宿主偏移与 `AXValue` 两套坐标系导致的取句偏上问题：先读宿主锚窗把偏移映射回 `AXValue` 文本再取句，映射配方向守卫（候选不得倒退）与光标后一位字符甄别，校验失败或读取出错时不翻（宁可不翻，不翻错行），宿主不提供该读取能力时沿用报告偏移；首版在真实宿主因空白表示法差异常不出卡（宿主用零宽空格+制表符表示块边界、`AXValue` 用换行，逐字锚窗找不到即不翻），已改为对空白形态容忍的映射——逐字失败时按去空白归一化匹配并还原原文索引（归一化锚不足 8 个非空白单元仍不匹配），甄别遇空白跳过；新增回归用例 testBlockBoundaryValueMapsToTheCaretLine、testUnmatchableAnchorEmitsNoSnapshot、testCandidateBeforeHostOffsetIsRejected、testPostCaretCharacterMismatchIsRejected、testPostCaretReadUnavailableStillMaps、testNativeHostAnchorHitsItsOwnOffset、testAnchorWindowLengthBoundAtDocumentStart、testUnsupportedAnchorReadKeepsReportedOffset、testFailedAnchorReadEmitsNoSnapshot、testCanonicallyEquivalentAnchorUsesFoundLength、testUnreadableValueWithReadableAnchorStillRecoversLastGoodText、testWhitespaceVariantAnchorStillMaps、testWhitespaceOnlyMatchIsRejected、testPostCaretWhitespaceSkipsCorroboration、testValueWhitespaceAtMappedIndexSkipsCorroboration。
 
