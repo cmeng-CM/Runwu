@@ -192,8 +192,12 @@ import XCTest
             XCTAssertTrue(root.rootView.contentPinned)
             XCTAssertNotNil(root.rootView.textHeightLimit)
             let button = try control(app.overlay)
+            // 译文区改成拖选后：正文中心交给文本选择层，标题栏仍是拖动区。
             let body = root.hitTest(root.convert(NSPoint(x: root.bounds.midX, y: root.bounds.midY), to: root.superview))
-            XCTAssertTrue(body is WindowDragCatcherView, "Body remains draggable")
+            XCTAssertFalse(body is WindowDragCatcherView, "译文区交给文本选择层")
+            let headerPoint = NSPoint(x: root.bounds.midX, y: root.isFlipped ? 8 : root.bounds.maxY - 8)
+            let header = root.hitTest(root.convert(headerPoint, to: root.superview))
+            XCTAssertTrue(header is WindowDragCatcherView, "标题栏仍是拖动区")
             XCTAssertFalse(button.window!.isKeyWindow)
             try save(panel, name: "long-\(theme.rawValue)")
             app.overlay.settleResize(of: id, to: 120)
@@ -260,8 +264,14 @@ import XCTest
                         let hit = host.hitTest(host.convert(point, to: host.superview))
                         XCTAssertNotNil(hit); XCTAssertFalse(hit is WindowDragCatcherView)
                     }
+                    // 译文区改成拖选后：标题栏仍是拖拽层，正文中心让给文本选择层。
+                    let headerPoint = NSPoint(
+                        x: host.bounds.midX,
+                        y: host.isFlipped ? 8 : host.bounds.maxY - 8)
+                    let headerHit = host.hitTest(host.convert(headerPoint, to: host.superview))
+                    XCTAssertTrue(headerHit is WindowDragCatcherView, "标题栏仍负责拖动")
                     let bodyHit = host.hitTest(host.convert(NSPoint(x: host.bounds.midX, y: host.bounds.midY), to: host.superview))
-                    XCTAssertTrue(bodyHit is WindowDragCatcherView)
+                    XCTAssertFalse(bodyHit is WindowDragCatcherView, "译文区应让给文本选择层")
                     print("STATUS_RESIZE", state, "body", body, "chrome", chrome,
                         "pinned", contentPinned, "settledFrame", settledFrame, "fitting", host.fittingSize)
                     try save(panel, name: "resize-\(state)-\(contentPinned)-\(Int(body))")

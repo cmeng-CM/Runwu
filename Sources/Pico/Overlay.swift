@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 
 /// Maps the persisted theme choice to concrete colors used by the overlay.
@@ -7,6 +8,7 @@ import SwiftUI
 /// 与底边缩放把手在 hitTest 里穿透给下层 SwiftUI 控件；滚轮显式转发给
 /// 正文滚动区（否则事件会死在本层）；悬停经 NSTrackingArea 上报，用于
 /// 悬停暂停自动隐藏与钉住按钮的浮现。
+/// 译文区（拖选复制）同样在 hitTest 里放行，边界由 SwiftUI 侧实测传入。
 private struct WindowDragCatcherRepresentable: NSViewRepresentable {
     var onHoverChange: (Bool) -> Void
     /// 仅视觉的初始同步：视图挂窗/重建时光标若已在卡内，直接点亮 cardHovered
@@ -17,6 +19,9 @@ private struct WindowDragCatcherRepresentable: NSViewRepresentable {
     var excludesHandle: Bool
     /// 钉住按钮当前是否可见（悬停或已钉住）：可见时头部命中区让位三键
     var pinChipVisible: Bool
+    /// 译文区顶边（相对卡片顶部，pt）。命中落在这条线以下时放行给 SwiftUI
+    /// 的文本选择层；nil 表示还没测到（首帧保持旧行为：整卡可拖）。
+    var selectableBodyTop: CGFloat?
 
     func makeNSView(context: Context) -> WindowDragCatcherView {
         let view = WindowDragCatcherView()
@@ -24,6 +29,7 @@ private struct WindowDragCatcherRepresentable: NSViewRepresentable {
         view.onInitialHoverSync = onInitialHoverSync
         view.excludesHandle = excludesHandle
         view.pinChipVisible = pinChipVisible
+        view.selectableBodyTop = selectableBodyTop
         return view
     }
 
@@ -32,6 +38,7 @@ private struct WindowDragCatcherRepresentable: NSViewRepresentable {
         nsView.onInitialHoverSync = onInitialHoverSync
         nsView.excludesHandle = excludesHandle
         nsView.pinChipVisible = pinChipVisible
+        nsView.selectableBodyTop = selectableBodyTop
     }
 }
 
@@ -40,6 +47,7 @@ final class WindowDragCatcherView: NSView {
     var onInitialHoverSync: ((Bool) -> Void)?
     var excludesHandle = false
     var pinChipVisible = false
+    var selectableBodyTop: CGFloat?
     private var startMouse: CGPoint?
     private var startOrigin: CGPoint?
     private var scrollTarget: NSScrollView?
@@ -107,6 +115,10 @@ final class WindowDragCatcherView: NSView {
         // 平时只让位复制/关闭的 70pt
         let chipsWidth: CGFloat = pinChipVisible ? 104 : 70
         if local.x >= width - chipsWidth, local.y >= height - 36 { return nil }
+        // 译文区放行给 SwiftUI 的文本选择层。边界用 SwiftUI 实测的译文顶边
+        // （滚动卡是滚动区顶边），不写死高度比例：原文多一行、换字号、卡片
+        // 变高都不会错位。
+        if let top = selectableBodyTop, top > 0, local.y < height - top { return nil }
         if excludesHandle,
             local.x >= width / 2 - 40, local.x <= width / 2 + 40,
             local.y <= 26 {
@@ -322,6 +334,27 @@ private struct OverlayServiceMenu: NSViewRepresentable {
     }
 }
 
+/// 每张卡片一份的轻量反馈状态：协调器写入，卡片视图只读。用 @Observable
+/// 而不是重建 hosting view，选区与字段编辑器在提示出现/消失时都不会丢。
+@MainActor
+@Observable
+final class OverlayCardFeedback {
+    /// 译文区拖选复制后的字符数；nil 表示不显示提示。
+    private(set) var selectionCopyCount: Int?
+    @ObservationIgnored private var clearTask: Task<Void, Never>?
+
+    func showSelectionCopied(count: Int) {
+        guard count > 0 else { return }
+        selectionCopyCount = count
+        clearTask?.cancel()
+        clearTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            self?.selectionCopyCount = nil
+        }
+    }
+}
+
 struct TranslationOverlayView: View {
     let text: String
     let fontSize: CGFloat
@@ -353,6 +386,14 @@ struct TranslationOverlayView: View {
     var onResizeEnd: (CGFloat) -> Void = { _ in }
     /// 钉住/解除钉住当前卡片。
     var onTogglePin: () -> Void = {}
+    /// 译文区拖选复制的轻提示（协调器写入，本视图只读）。
+    var feedback: OverlayCardFeedback? = nil
+    /// 译文区顶边变化（相对卡片顶部）：协调器据此判断松手位置是否落在
+    /// 可选中区域，并在滚动卡里拿到滚动区顶边。
+    var onSelectableBodyTopChange: (CGFloat) -> Void = { _ in }
+
+    /// 卡片坐标系名字：译文区顶边用同一套坐标回传，避免与外层坐标混用。
+    static let cardSpace = "overlay-card"
 
     @State private var closeHovered = false
     @State private var copyHovered = false
@@ -365,6 +406,8 @@ struct TranslationOverlayView: View {
     /// Body height while the handle is being dragged; nil falls back to the
     /// installed limit (also how double-click restores the default).
     @State private var liveLimit: CGFloat?
+    /// 译文区顶边（相对卡片顶部，pt）：布局实测后驱动拖拽层放行。
+    @State private var selectableBodyTop: CGFloat?
 
     private var effectiveLimit: CGFloat? { liveLimit ?? textHeightLimit }
 
@@ -431,6 +474,13 @@ struct TranslationOverlayView: View {
         .padding(.top, 10)
         .padding(.bottom, 13)
         .frame(minWidth: 340, maxWidth: 600)
+        .coordinateSpace(name: Self.cardSpace)
+        .onPreferenceChange(SelectableBodyTopKey.self) { value in
+            let boundary = value.boundary
+            guard boundary > 0 else { return }
+            if selectableBodyTop != boundary { selectableBodyTop = boundary }
+            onSelectableBodyTopChange(boundary)
+        }
         .overlay { WindowDragCatcherRepresentable(
             // 悬停事件两个去向缺一不可：cardHovered 只管钉住键浮现，
             // 暂停/恢复自动隐藏必须同步上报协调器（onHoverChange→setHovering）。
@@ -441,10 +491,27 @@ struct TranslationOverlayView: View {
             },
             onInitialHoverSync: { cardHovered = $0 },
             excludesHandle: textHeightLimit != nil,
-            pinChipVisible: cardHovered || contentPinned) }
+            pinChipVisible: cardHovered || contentPinned,
+            selectableBodyTop: selectableBodyTop) }
         .overlay(alignment: .bottom) {
             if textHeightLimit != nil { resizeHandle }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let count = feedback?.selectionCopyCount {
+                Text(L10n.overlaySelectionCopied(count, serviceLanguage))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.thinMaterial, in: Capsule())
+                    .overlay(Capsule().stroke(Color.primary.opacity(0.10), lineWidth: 0.5))
+                    .padding(.trailing, 10)
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: feedback?.selectionCopyCount)
         .background {
             surfaceShape
                 .overlay {
@@ -460,18 +527,26 @@ struct TranslationOverlayView: View {
     }
 
     @ViewBuilder private var textBody: some View {
+        // 译文可拖选：选中多少由用户自己拖，松手即把选区写进剪贴板
+        // （整段复制仍然是最上面那个复制键）。
+        let translation = MarkdownCardBodyView(text: text, fontSize: fontSize, accentColor: theme.accentColor)
+            .textSelection(.enabled)
+            .background(SelectableBodyTopReader(role: .translation))
         let bodyText = VStack(alignment: .leading, spacing: 8) {
             if let sourceText {
                 Text(sourceText).font(.system(size: fontSize)).foregroundStyle(.secondary)
                 Divider()
             }
-            MarkdownCardBodyView(text: text, fontSize: fontSize, accentColor: theme.accentColor)
+            translation
         }
         .multilineTextAlignment(.leading)
         .frame(maxWidth: .infinity, alignment: .leading)
         if let limit = effectiveLimit {
+            // 滚动卡里原文跟着译文一起滚：滚出去之后边界退到滚动区顶边，
+            // 不会留下一条点了没反应的原文区。
             ScrollView(.vertical) { bodyText }
                 .frame(height: limit)
+                .background(SelectableBodyTopReader(role: .container))
         } else {
             bodyText
         }
@@ -537,6 +612,43 @@ struct TranslationOverlayView: View {
     }
 }
 
+/// 译文区边界（相对卡片顶部，pt）。两个来源取较大值：
+/// - 译文顶边：短卡里它在原文下方，所以「标题栏 + 原文」整块都能拖；
+/// - 滚动区顶边：长卡里原文跟着译文一起滚，滚走之后不能留下一条点了没反应
+///   的原文区，边界退到滚动区顶边（只剩标题栏可拖）。
+/// 两者都由 SwiftUI 布局实测回传，字号、行数、卡片高度变化都不用改常量。
+private struct SelectableBodyTop: Equatable {
+    var translationTop: CGFloat = 0
+    var containerTop: CGFloat = 0
+    var boundary: CGFloat { max(translationTop, containerTop) }
+}
+
+private struct SelectableBodyTopKey: PreferenceKey {
+    static let defaultValue = SelectableBodyTop()
+    static func reduce(value: inout SelectableBodyTop, nextValue: () -> SelectableBodyTop) {
+        let next = nextValue()
+        value.translationTop = max(value.translationTop, next.translationTop)
+        value.containerTop = max(value.containerTop, next.containerTop)
+    }
+}
+
+private struct SelectableBodyTopReader: View {
+    enum Role { case translation, container }
+    let role: Role
+
+    var body: some View {
+        GeometryReader { proxy in
+            let top = proxy.frame(in: .named(TranslationOverlayView.cardSpace)).minY
+            Color.clear.preference(
+                key: SelectableBodyTopKey.self,
+                value: role == .translation
+                    ? SelectableBodyTop(translationTop: top)
+                    : SelectableBodyTop(containerTop: top))
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 /// 自由浮窗面板：关闭 AppKit 默认的窗口框架约束——默认实现会把窗口
 /// 顶边压回菜单栏/屏幕上缘之下，导致「把卡片往顶上抽出去」永远做不到
 /// （左右下三向系统本就不设栏）。四向自由全靠这个覆写。
@@ -544,6 +656,14 @@ final class OverlayPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
+
+    /// 这个面板绝不能成为 key：一旦抢到 key，macOS 会激活本 App，辅助功能
+    /// 焦点离开用户的输入框，输入管线判定失焦后把实时卡直接收起（实测点一下
+    /// 卡片就消失，连拖动都来不及）。拖选本身不需要 key——文本选择层在非 key
+    /// 窗口里照样能拖选，复制走响应链的 copy: 即可。
+    /// 所以不要恢复 canBecomeKey / makeKey；选区在非 key 窗口里可能是浅灰色，
+    /// 这是有意接受的代价。
+    override var canBecomeKey: Bool { false }
 }
 
 enum OverlayOrigin: Equatable {
@@ -699,7 +819,7 @@ struct OverlayFollowingLayout {
 }
 
 @MainActor final class OverlayCoordinator {
-    private final class Entry {
+    @MainActor private final class Entry {
         let id: UUID
         let key: String
         let panel: NSPanel
@@ -728,6 +848,10 @@ struct OverlayFollowingLayout {
         var contentPinned = false
         var usesAnchor = false
         var hideTask: Task<Void, Never>?
+        /// 译文区顶边（相对卡片顶部，pt）：拖拽层放行与选区监听的边界。
+        var selectableBodyTop: CGFloat?
+        /// 本卡的「已复制选中」轻提示状态。
+        let feedback = OverlayCardFeedback()
         /// Lets us detach the didMove observer when the entry goes away.
         var moveObserver: NSObjectProtocol?
         init(id: UUID, key: String, panel: NSPanel, screen: NSScreen?, avoid: NSRect?, text: String,
@@ -758,8 +882,32 @@ struct OverlayFollowingLayout {
     /// tests can reach the drag catcher and drive its hover callbacks the way
     /// tracking-area delivery does.
     var panelContentViews: [NSView] { entries.compactMap { $0.panel.contentView } }
+    /// Debug/test hook: 各卡实测的译文区顶边（相对卡片顶部，pt）。
+    var selectableBodyTops: [CGFloat] { entries.compactMap { $0.selectableBodyTop } }
 
     private var entries: [Entry] = []
+    /// 译文区拖选的鼠标监视器：只判断「点在哪张卡的哪一半」，复制动作
+    /// 交给 copySelection（松手后延后一拍，等文本交互层提交选区）。
+    /// 用本地监视器而不是给卡片加手势：选区由 SwiftUI 的文本选择层自己
+    /// 处理，手势会和它抢事件。
+    /// nonisolated(unsafe)：deinit 是 nonisolated，只有这里需要读它来注销
+    /// 监视器；写入只在 init、读取只在 deinit，没有并发竞争。
+    nonisolated(unsafe) private var mouseMonitor: Any?
+    /// 正在译文区拖选的卡片：按下时记录，松开时复制。
+    private weak var selectionDragPanel: NSPanel?
+
+    init() {
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) {
+            [weak self] event in
+            MainActor.assumeIsolated { self?.handleOverlayMouse(event) }
+            return event
+        }
+    }
+
+    deinit {
+        if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
+    }
+
     /// Top-left corner the next fresh overlay should use. Set when the user
     /// drags a panel; cleared when the configured position changes.
     private var anchor: CGPoint?
@@ -774,7 +922,9 @@ struct OverlayFollowingLayout {
             // A global menu checkmark must not remeasure another card's resized body budget.
             for entry in entries {
                 (entry.panel.contentView as? NSHostingView<TranslationOverlayView>)?.rootView =
-                    makeView(text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
+                    makeView(
+                        text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id,
+                        reportsBodyTop: true)
             }
         }
     }
@@ -842,7 +992,9 @@ struct OverlayFollowingLayout {
     /// 「可查询内在尺寸」，尺寸一律由 relayout 按实测文本高度决定。
     private func hostingView(text: String, textHeightLimit: CGFloat?, id: UUID)
         -> NSHostingView<TranslationOverlayView> {
-        let host = NSHostingView(rootView: makeView(text: text, textHeightLimit: textHeightLimit, id: id))
+        let host = NSHostingView(
+            rootView: makeView(
+                text: text, textHeightLimit: textHeightLimit, id: id, reportsBodyTop: true))
         host.sizingOptions = [.intrinsicContentSize]
         return host
     }
@@ -992,7 +1144,12 @@ struct OverlayFollowingLayout {
     }
     private var measurePanelStorage: NSPanel?
 
-    private func makeView(text: String, textHeightLimit: CGFloat?, id: UUID) -> TranslationOverlayView {
+    /// - Parameter reportsBodyTop: 只有真正上屏的 hosting view 才回传译文区
+    ///   顶边；量高度用的临时视图（同一份 makeView）布局尺寸完全不同，回传
+    ///   会把真实卡片的边界写坏。
+    private func makeView(
+        text: String, textHeightLimit: CGFloat?, id: UUID, reportsBodyTop: Bool = false
+    ) -> TranslationOverlayView {
         let entry = entries.first(where: { $0.id == id })
         return TranslationOverlayView(
             text: text,
@@ -1031,7 +1188,11 @@ struct OverlayFollowingLayout {
             },
             onTogglePin: { [weak self] in
                 self?.togglePin(of: id)
-            })
+            },
+            feedback: entry?.feedback,
+            onSelectableBodyTopChange: reportsBodyTop
+                ? { [weak self] top in self?.recordSelectableBodyTop(id, top) }
+                : { _ in })
     }
 
     private func screenForEntry(_ id: UUID) -> NSScreen? {
@@ -1087,6 +1248,83 @@ struct OverlayFollowingLayout {
             DiagnosticLog.write("overlay unpinned id=\(id.uuidString.prefix(6))")
         }
         installContent(for: entry)
+    }
+
+    /// 鼠标落在某张卡的译文区时：按下让面板成为 key（nonactivating 面板
+    /// 成为 key 不会激活 App），松开后延后一拍读取选区并复制。按下的卡片
+    /// 记在 selectionDragPanel：拖到卡片外再松手也算一次拖选。
+    private func handleOverlayMouse(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            guard let entry = bodyEntry(at: NSEvent.mouseLocation) else { return }
+            selectionDragPanel = entry.panel
+            // 不抢 key：抢到 key 会把 App 激活，辅助功能焦点随之变化，卡片会被
+            // 当成失焦直接收起。
+        case .leftMouseUp:
+            guard let panel = selectionDragPanel else { return }
+            selectionDragPanel = nil
+            // mouseUp 派发完文本交互层才提交选区，延后一拍再读。
+            DispatchQueue.main.async { [weak self] in
+                _ = self?.copySelection(in: panel)
+            }
+        default:
+            break
+        }
+    }
+
+    /// 内容视图坐标是否落在译文区。NSHostingView 是 flipped 的（y 从顶部往下
+    /// 量），普通 NSView 才是从底部往上；混用会把下半张卡的拖选当成标题栏，
+    /// 复制永远不触发。
+    static func isSelectableBodyPoint(_ point: CGPoint, in view: NSView, bodyTop: CGFloat) -> Bool {
+        let fromTop = view.isFlipped ? point.y : view.bounds.height - point.y
+        return fromTop >= bodyTop
+    }
+
+    /// 屏幕坐标落在哪张卡的译文区（不含标题栏/原文区）。多卡重叠时取最上面
+    /// 那张：后出现的卡片在 entries 末尾、也在最前。
+    private func bodyEntry(at screenPoint: NSPoint) -> Entry? {
+        for entry in entries.reversed() {
+            guard entry.panel.isVisible, entry.panel.frame.contains(screenPoint),
+                let bodyTop = entry.selectableBodyTop, bodyTop > 0,
+                let contentView = entry.panel.contentView
+            else { continue }
+            let inWindow = entry.panel.convertPoint(fromScreen: screenPoint)
+            let inContent = contentView.convert(inWindow, from: nil)
+            if Self.isSelectableBodyPoint(inContent, in: contentView, bodyTop: bodyTop) { return entry }
+        }
+        return nil
+    }
+
+    /// 译文区拖选后把选区写进剪贴板。选区由 SwiftUI 的文本交互层自己持有
+    /// （没有可读的 selectedRange，也不是字段编辑器），所以走响应链上的
+    /// copy: 动作，并用剪贴板变化判断「这次真的选中了东西」——单击没有
+    /// 选区时 copy: 不写板子。整段复制仍走卡片顶部的复制键。
+    @discardableResult
+    func copySelection(in panel: NSPanel) -> String? {
+        guard let entry = entries.first(where: { $0.panel === panel }) else { return nil }
+        let pasteboard = NSPasteboard.general
+        let before = pasteboard.changeCount
+        let responder = panel.firstResponder
+        let handled = responder?.tryToPerform(#selector(NSText.copy(_:)), with: nil) ?? false
+        guard handled, pasteboard.changeCount != before,
+            let copied = pasteboard.string(forType: .string), !copied.isEmpty
+        else {
+            let name = responder.map { String(describing: type(of: $0)) } ?? "nil"
+            DiagnosticLog.write(
+                "overlay selection copy skipped handled=\(handled) responder=\(name) changed=\(pasteboard.changeCount != before)")
+            return nil
+        }
+        onCopyToPasteboard?(copied)
+        entry.feedback.showSelectionCopied(count: copied.count)
+        DiagnosticLog.write(
+            "overlay selection copied chars=\(copied.count) id=\(entry.id.uuidString.prefix(6))")
+        return copied
+    }
+
+    /// 译文区顶边由卡片视图实测回传；只更新数据，不触发重排。
+    private func recordSelectableBodyTop(_ id: UUID, _ top: CGFloat) {
+        guard let entry = entries.first(where: { $0.id == id }) else { return }
+        entry.selectableBodyTop = top
     }
 
     /// Pauses auto-hide while the cursor rests on the card so long

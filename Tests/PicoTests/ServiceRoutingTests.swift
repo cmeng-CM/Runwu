@@ -183,13 +183,14 @@ final class ServiceRoutingTests: XCTestCase {
         }
     }
 
-    func testKeyPersistenceUsesInjectedKeychainAndNeverSerializesSecret() throws {
+    func testModelKeyLivesInAppSettingsAndKeychainIsUntouched() throws {
         let keys = RoutingKeys(), store = settings(keys: keys), defaults = suites.last!.0
         let configuration = model()
         store.llmModels = [configuration]
         let data = try XCTUnwrap(defaults.data(forKey: "llmModels"))
-        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("SENTINEL_KEY"))
-        XCTAssertEqual(try keys.apiKey(forModelID: configuration.id), "SENTINEL_KEY")
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("SENTINEL_KEY"),
+            "密钥随模型配置保存在本机设置里")
+        XCTAssertNil(try keys.apiKey(forModelID: configuration.id), "不再写钥匙串")
         let reloaded = SettingsStore(defaults: defaults, modelKeyStorage: keys)
         XCTAssertEqual(reloaded.llmModels.first?.apiKey, "SENTINEL_KEY")
         XCTAssertEqual(reloaded.llmModels.first?.baseURL, configuration.baseURL)

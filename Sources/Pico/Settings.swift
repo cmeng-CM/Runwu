@@ -454,6 +454,7 @@ struct ReplaceShortcut: Equatable, Sendable {
     /// the selected retention period.
     var onHistoryRetentionChanged: (() -> Void)?
     private let defaults: UserDefaults
+    /// 只用于旧版钥匙串密钥的显式导入；新密钥一律随模型配置保存在本机设置里。
     private let modelKeyStorage: any ModelKeyStoring
 
     init(defaults: UserDefaults = .standard, modelKeyStorage: any ModelKeyStoring = KeychainStore()) {
@@ -536,7 +537,6 @@ struct ReplaceShortcut: Equatable, Sendable {
                 "com.agilebits.onepassword7", "com.apple.keychainaccess", "com.apple.dt.Xcode", "com.openai.codex",
                 "com.asiyoua.pico", "com.comeg.runwu",
             ])
-        restoreAPIKeysFromKeychain()
         if defaults.object(forKey: "translationSpeed") == nil {
             defaults.set(speedValue, forKey: "translationSpeed")
         }
@@ -557,7 +557,6 @@ struct ReplaceShortcut: Equatable, Sendable {
         if defaults.object(forKey: "speechEnabled") == nil {
             defaults.set(speechEnabled, forKey: "speechEnabled")
         }
-        migrateLegacyAPIKeysToKeychain()
     }
 
     func updateLLMModel(_ model: LLMModelConfiguration) {
@@ -576,7 +575,6 @@ struct ReplaceShortcut: Equatable, Sendable {
 
     func removeLLMModel(id: UUID) {
         llmModels.removeAll { $0.id == id }
-        try? modelKeyStorage.deleteAPIKey(forModelID: id)
     }
 
     func moveLLMModels(from offsets: IndexSet, to destination: Int) {
@@ -609,38 +607,24 @@ struct ReplaceShortcut: Equatable, Sendable {
         return (try? JSONDecoder().decode([LLMModelConfiguration].self, from: data)) ?? []
     }
 
+    /// 密钥随模型配置一起写进本机偏好（不再进钥匙串）：数据只在本机的
+    /// com.comeg.runwu 偏好文件里，不随模型快照发往任何地方。
     private func persistLLMModels() {
-        var publicModels = llmModels
-        let keychain = modelKeyStorage
-        for index in publicModels.indices {
-            let model = publicModels[index]
-            if model.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                try? keychain.deleteAPIKey(forModelID: model.id)
-            } else {
-                try? keychain.setAPIKey(model.apiKey, forModelID: model.id)
-            }
-            publicModels[index].apiKey = ""
-            publicModels[index].timeoutSeconds = 0
-        }
-        guard let data = try? JSONEncoder().encode(publicModels) else { return }
+        var models = llmModels
+        for index in models.indices { models[index].timeoutSeconds = 0 }
+        guard let data = try? JSONEncoder().encode(models) else { return }
         defaults.set(data, forKey: "llmModels")
     }
 
-    private func restoreAPIKeysFromKeychain() {
-        let keychain = modelKeyStorage
-        for index in llmModels.indices {
-            if let value = try? keychain.apiKey(forModelID: llmModels[index].id), !value.isEmpty {
-                llmModels[index].apiKey = value
-            }
+    /// 旧版本把密钥存在钥匙串。只有用户在模型卡片里点「导入旧密钥」时才读
+    /// 一次（系统会问一次钥匙串授权），拿到后随模型配置写进本机设置；
+    /// 平时（启动、编辑其它字段、翻译）完全不访问钥匙串。
+    func legacyAPIKeyFromKeychain(for id: UUID) -> String? {
+        do {
+            return try modelKeyStorage.apiKey(forModelID: id)
+        } catch {
+            return nil
         }
-    }
-
-    private func migrateLegacyAPIKeysToKeychain() {
-        // Models written by earlier preview builds may contain a plaintext
-        // key in the preferences blob. Import it once and immediately rewrite
-        // the public snapshot with an empty key.
-        guard llmModels.contains(where: { !$0.apiKey.isEmpty }) else { return }
-        persistLLMModels()
     }
 
     private static func clampLLMTimeout(_ value: Double) -> Double {

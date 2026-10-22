@@ -144,8 +144,13 @@ enum L10n {
     static func timeoutSeconds(_ lang: UILanguage, _ value: Int) -> String {
         lang == .chinese ? "超过 \(value) 秒切换" : "Switch after \(value) sec"
     }
-    static func apiKeyKeychainHint(_ lang: UILanguage) -> String {
-        lang == .chinese ? "API 密钥仅保存于此 Mac 的钥匙串。" : "API keys are stored only in this Mac's Keychain."
+    static func apiKeyStorageHint(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "API 密钥随模型配置保存在本机设置里，不再写入钥匙串。"
+            : "API keys are saved with the model configuration on this Mac; Keychain is no longer used."
+    }
+    static func importLegacyKey(_ lang: UILanguage) -> String {
+        lang == .chinese ? "导入旧版钥匙串密钥" : "Import key from Keychain"
     }
     static func modelPlaceholder(_ lang: UILanguage) -> String { lang == .chinese ? "例如：DeepSeek 主模型" : "For example: Primary DeepSeek" }
     static func urlPlaceholder(_ lang: UILanguage) -> String { "https://api.example.com/v1" }
@@ -725,6 +730,10 @@ enum L10n {
     static func overlayRetranslating(_ backend: TranslationBackend, _ lang: UILanguage) -> String {
         let service = backend.displayName(for: lang)
         return lang == .chinese ? "正在用\(service)重新翻译…" : "Retranslating with \(service)…"
+    }
+    /// 译文区拖选复制后的轻提示：只报字数，不带原文。
+    static func overlaySelectionCopied(_ count: Int, _ lang: UILanguage) -> String {
+        lang == .chinese ? "已复制选中 \(count) 字" : "Copied \(count) characters"
     }
 
 }

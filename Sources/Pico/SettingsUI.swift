@@ -229,12 +229,15 @@ struct LLMModelEditor: View {
     @State private var draft: LLMModelConfiguration
     @State private var isExpanded = false
     let language: UILanguage
+    /// 旧版密钥在钥匙串里：只有用户点「导入」才读一次，平时不碰钥匙串。
+    let importLegacyKey: (UUID) -> String?
     let save: (LLMModelConfiguration) -> Void
     let remove: () -> Void
 
     init(
         model: LLMModelConfiguration,
         language: UILanguage,
+        importLegacyKey: @escaping (UUID) -> String?,
         save: @escaping (LLMModelConfiguration) -> Void,
         remove: @escaping () -> Void
     ) {
@@ -244,6 +247,7 @@ struct LLMModelEditor: View {
         }
         _draft = State(initialValue: initialDraft)
         self.language = language
+        self.importLegacyKey = importLegacyKey
         self.save = save
         self.remove = remove
     }
@@ -302,7 +306,19 @@ struct LLMModelEditor: View {
                         TextField(L10n.urlPlaceholder(language), text: $draft.baseURL).textFieldStyle(.roundedBorder)
                     }
                     LabeledField(label: L10n.apiKey(language)) {
-                        SecureField("", text: $draft.apiKey).textFieldStyle(.roundedBorder)
+                        VStack(alignment: .leading, spacing: 4) {
+                            SecureField("", text: $draft.apiKey).textFieldStyle(.roundedBorder)
+                            if draft.apiKey.isEmpty {
+                                Button(L10n.importLegacyKey(language)) {
+                                    if let key = importLegacyKey(draft.id), !key.isEmpty {
+                                        draft.apiKey = key
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     LabeledField(label: L10n.modelID(language)) {
                         TextField(L10n.modelIDPlaceholder(language), text: $draft.model).textFieldStyle(.roundedBorder)
@@ -963,7 +979,7 @@ struct SettingsView: View {
                 }
             }
         }
-        Text(L10n.apiKeyKeychainHint(lang))
+        Text(L10n.apiKeyStorageHint(lang))
             .font(.caption)
             .foregroundStyle(.secondary)
         if settings.llmModels.isEmpty {
@@ -977,6 +993,7 @@ struct SettingsView: View {
                     LLMModelEditor(
                         model: model,
                         language: lang,
+                        importLegacyKey: { settings.legacyAPIKeyFromKeychain(for: $0) },
                         save: { settings.updateLLMModel($0) },
                         remove: { settings.removeLLMModel(id: model.id) })
                         .padding(12)
