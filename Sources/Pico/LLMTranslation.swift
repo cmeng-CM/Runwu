@@ -9,6 +9,22 @@ public enum LLMTranslationPrompt {
         """
 }
 
+/// System prompt and version for the English input-calibration task (design
+/// 4.2, D-C5/D-C13). Kept beside the translation prompt so both stay in one
+/// place; the version participates in the calibration cache key.
+public enum LLMCalibrationPrompt {
+    public static let version = "cal-v1"
+    public static let systemPrompt = """
+        你是面向中文母语者的英文写作审校。用户会给你一句他们自己写的英文。请评估这句话的语法、搭配、地道性和语义是否清楚，并只返回一个 JSON 对象，不要输出任何其它文字或代码围栏。对象结构：
+        {"verdict":"good|minor|major","back_translation_zh":"…","corrected":"…","issues":[{"quote":"…","kind":"grammar|usage|word-choice|spelling|style","reason_zh":"…","fix":"…"}]}
+        字段要求：
+        - verdict：good=表达到位；minor=有小问题但意思清楚；major=语法或语义错误影响理解。
+        - back_translation_zh：把用户原句（即使有错）按它实际表达的意思译成中文，让用户核对该句是否说了想说的内容；不要基于修正后的句子翻译。
+        - corrected：整句修正后的英文；verdict 为 good 时与原句相同。
+        - issues：最多 5 条，只列影响语义、语法、搭配或地道性的真实问题；quote 必须是原句的精确子串；kind 为问题类型；reason_zh 用中文说明原因；fix 是替换 quote 的建议。没有可报告的问题时 issues 为空数组。
+        """
+}
+
 /// The wire protocol used by a language-model endpoint.
 ///
 /// DeepSeek, GLM and most OpenAI-compatible gateways use the chat-completions
@@ -278,6 +294,7 @@ public enum LLMTranslationError: Error, Equatable, LocalizedError, Sendable {
     case timeout(model: String, seconds: Double)
     case httpStatus(model: String, statusCode: Int, message: String)
     case invalidResponse(model: String, message: String)
+    case malformedCalibration(model: String, message: String)
     case allModelsFailed([LLMModelFailure])
 
     public var errorDescription: String? {
@@ -294,6 +311,8 @@ public enum LLMTranslationError: Error, Equatable, LocalizedError, Sendable {
             return "\(model) returned HTTP \(statusCode): \(message)"
         case let .invalidResponse(model, message):
             return "\(model) returned an invalid response: \(message)"
+        case let .malformedCalibration(model, message):
+            return "\(model) returned an unusable calibration result: \(message)"
         case let .allModelsFailed(failures):
             if failures.isEmpty { return "All language models failed." }
             let details = failures.map { "\($0.modelName): \($0.message)" }.joined(separator: "; ")
@@ -391,6 +410,89 @@ public actor LLMModelRouter: TranslationEngine {
         throw LLMTranslationError.allModelsFailed(failures)
     }
 
+    /// English input calibration (design 4.2): one attempt per enabled model in
+    /// the same failover order as translation. A malformed or semantically
+    /// invalid JSON payload counts as a model failure (D-C4), so the next model
+    /// gets a chance instead of a faked verdict.
+    func calibrate(_ text: String) async throws -> CalibrationVerdict {
+        let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { throw LLMTranslationError.emptyText }
+
+        let enabledModels = configurations.filter(\.enabled)
+        let requestDefaultTimeout = defaultTimeoutSeconds
+        guard !enabledModels.isEmpty else { throw LLMTranslationError.noEnabledModels }
+
+        var failures: [LLMModelFailure] = []
+        for configuration in enabledModels {
+            try Task.checkCancellation()
+            do {
+                let timeout = configuration.timeoutSeconds > 0
+                    ? Self.clampTimeout(configuration.timeoutSeconds)
+                    : requestDefaultTimeout
+                let result = try await withTimeout(timeout, modelName: configuration.name) {
+                    try await self.calibrationRequest(input, configuration: configuration, timeout: timeout)
+                }
+                try Task.checkCancellation()
+                return result
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as LLMTranslationError {
+                failures.append(
+                    LLMModelFailure(
+                        id: configuration.id,
+                        modelName: configuration.name,
+                        message: error.errorDescription ?? String(describing: error)))
+            } catch {
+                failures.append(
+                    LLMModelFailure(
+                        id: configuration.id,
+                        modelName: configuration.name,
+                        message: error.localizedDescription))
+            }
+        }
+        throw LLMTranslationError.allModelsFailed(failures)
+    }
+
+    private func calibrationRequest(
+        _ text: String,
+        configuration: LLMModelConfiguration,
+        timeout: Double
+    ) async throws -> CalibrationVerdict {
+        var request = try baseRequest(configuration: configuration, timeout: timeout)
+        if configuration.provider.isAnthropic {
+            request.httpBody = try Self.encodeClaudeCalibrationRequest(text: text, configuration: configuration)
+        } else {
+            request.httpBody = try Self.encodeOpenAICalibrationRequest(text: text, configuration: configuration)
+        }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMTranslationError.invalidResponse(model: configuration.name, message: "Missing HTTP response")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = Self.errorMessage(from: data)
+                ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            throw LLMTranslationError.httpStatus(
+                model: configuration.name, statusCode: httpResponse.statusCode, message: message)
+        }
+        let content: String
+        do {
+            content = configuration.provider.isAnthropic
+                ? try Self.decodeClaudeResponse(data)
+                : try Self.decodeOpenAIResponse(data)
+        } catch let error as LLMTranslationError {
+            throw error
+        } catch {
+            throw LLMTranslationError.invalidResponse(model: configuration.name, message: error.localizedDescription)
+        }
+        do {
+            return try CalibrationResponseParser.parse(content, source: text)
+        } catch {
+            DiagnosticLog.write("calibration malformed model=\(configuration.name)")
+            throw LLMTranslationError.malformedCalibration(
+                model: configuration.name, message: String(describing: error))
+        }
+    }
+
     private func request(
         _ text: String,
         from source: Language,
@@ -398,28 +500,11 @@ public actor LLMModelRouter: TranslationEngine {
         configuration: LLMModelConfiguration,
         timeout: Double
     ) async throws -> String {
-        let endpoint = try Self.endpointURL(for: configuration)
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        // URLSession's own timeout complements the task-group race below. It
-        // ensures a stalled DNS/TLS/body task is cancelled even when a custom
-        // URLProtocol or a proxy does not react immediately to cancellation.
-        request.timeoutInterval = timeout
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let apiKey = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        var request = try baseRequest(configuration: configuration, timeout: timeout)
         if configuration.provider.isAnthropic {
-            if !apiKey.isEmpty {
-                request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-            }
-            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             request.httpBody = try Self.encodeClaudeRequest(
                 text: text, source: source, target: target, configuration: configuration)
         } else {
-            if !apiKey.isEmpty {
-                let authorization = apiKey.lowercased().hasPrefix("bearer ") ? apiKey : "Bearer \(apiKey)"
-                request.setValue(authorization, forHTTPHeaderField: "Authorization")
-            }
             request.httpBody = try Self.encodeOpenAIRequest(
                 text: text, source: source, target: target, configuration: configuration)
         }
@@ -449,6 +534,31 @@ public actor LLMModelRouter: TranslationEngine {
             throw LLMTranslationError.invalidResponse(model: configuration.name, message: "Empty translation")
         }
         return value
+    }
+
+    /// Shared URL building for translation and calibration requests: endpoint
+    /// normalization, method, headers, and auth. URLSession's own timeout
+    /// complements the task-group race above. It ensures a stalled DNS/TLS/body
+    /// task is cancelled even when a custom URLProtocol or a proxy does not
+    /// react immediately to cancellation.
+    private func baseRequest(configuration: LLMModelConfiguration, timeout: Double) throws -> URLRequest {
+        let endpoint = try Self.endpointURL(for: configuration)
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let apiKey = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if configuration.provider.isAnthropic {
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            }
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else if !apiKey.isEmpty {
+            let authorization = apiKey.lowercased().hasPrefix("bearer ") ? apiKey : "Bearer \(apiKey)"
+            request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     private func withTimeout<T: Sendable>(
@@ -675,6 +785,37 @@ private extension LLMModelRouter {
                 system: system.isEmpty ? LLMTranslationPrompt.defaultSystemPrompt : system,
                 messages: [ChatMessage(role: "user", content: prompt)],
                 thinking: thinking))
+    }
+
+    /// Calibration always uses the fixed calibration system prompt (D-C5) and
+    /// never sends `reasoning_effort`, regardless of the model's translation
+    /// thinking preference (D-C13).
+    static func encodeOpenAICalibrationRequest(
+        text: String,
+        configuration: LLMModelConfiguration
+    ) throws -> Data {
+        let messages = [
+            ChatMessage(role: "system", content: LLMCalibrationPrompt.systemPrompt),
+            ChatMessage(role: "user", content: text),
+        ]
+        return try JSONEncoder().encode(
+            OpenAIRequest(model: configuration.model, messages: messages, stream: false, reasoning_effort: nil))
+    }
+
+    /// Claude calibration: no thinking budget, raised `max_tokens` so a long
+    /// issues list is not truncated by the shared 2048-token translation cap
+    /// (D-C13).
+    static func encodeClaudeCalibrationRequest(
+        text: String,
+        configuration: LLMModelConfiguration
+    ) throws -> Data {
+        try JSONEncoder().encode(
+            ClaudeRequest(
+                model: configuration.model,
+                max_tokens: 4096,
+                system: LLMCalibrationPrompt.systemPrompt,
+                messages: [ChatMessage(role: "user", content: text)],
+                thinking: nil))
     }
 
     static func decodeOpenAIResponse(_ data: Data) throws -> String {

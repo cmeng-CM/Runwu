@@ -63,6 +63,7 @@ struct TranslationErrorDiagnostic {
                 kind = .httpStatus
                 statusCode = code
             case .invalidResponse: kind = .invalidResponse
+            case .malformedCalibration: kind = .invalidResponse
             case .allModelsFailed(let failures):
                 kind = .allModelsFailed
                 failureCount = failures.count
