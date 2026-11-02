@@ -232,6 +232,10 @@ struct MenuBarMenu: View {
         }
         monitor.onFocusChanged = { [weak self] in
             self?.invalidateRealtime(clearAnchor: true, alsoClearCalibration: true)
+            // Focus loss ends the session for both pipelines; a stale
+            // calibration anchor would reject the next session's first anchor
+            // event (REV-2 R2-11).
+            self?.calibration.invalidate(clearAnchor: true)
             self?.input.reset()
         }
         input.excludedBundleIDs = settings.excludedBundleIDs

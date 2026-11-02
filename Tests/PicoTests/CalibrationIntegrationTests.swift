@@ -203,7 +203,7 @@ final class CalibrationIntegrationTests: XCTestCase {
         XCTAssertNil(app.calibrationFailure)
         // Follow-up English sentence still calibrates through the same config.
         sendLive(app, "She dont like apples.", session: liveSession)
-        try await wait { app.overlay.cardContents.first?.source == "She dont like apples." }
+        try await wait { app.overlay.shownEntryIDs.count == 1 && app.overlay.cardContents.first?.source == "She dont like apples." }
         XCTAssertEqual(CalibrationMockURLProtocol.hosts.count, 2)
         // Source change: English now routes to translation instead — no more
         // calibration requests, and the unpinned calibration card is cleared.
