@@ -9,6 +9,7 @@
 | T-03 浮窗校准卡 | **已实现** 989e0d8；V-1 通过（含 CalibrationOverlayTests 8 项） |
 | T-04 AppState 接线与设置 | **已实现** 362f81f；V-2 通过（CalibrationIntegrationTests 9 项 + SettingsStoreTests 扩展） |
 | T-05 整体回归与手册 | **已实现** 3cbd28e；全量 `swift test` 400 项 0 失败（1 项联网探测跳过） |
+| T6/T7 审查修复 | **已实现** c2e6645 / 4687755 |
 | REV-2 整体实现审查 | **通过**（implementation-reviews/001.md §7 复审：R2-01 修复核验通过、独立复跑 400/0/1skip、无新阻塞）；残留 R2-11/R2-12 已随后修复（T7） |
 | V-3 整体证据集 | 全量 400 项 0 失败（修复后复跑）；`zsh Scripts/build-app.sh` 构建成功（Runwu Local 签名，`codesign --verify --deep --strict` 通过）→ **通过** |
 
@@ -22,7 +23,15 @@
 - 已知偶发失败 G-5 本轮未出现。
 - 测试适配（G-2）：19 处 onSentence 闭包加 route 参数；3 处 DiagnosticsSnapshot 构造加 2 个新字段；断言语义均未改动。OverlayServiceMetadata/ServiceRouting/CaretTracking 等既有测试全量通过。
 
+## 完成判定
+
+- T-01～T-05 + 审查修复全部实现 ✅
+- V-1/V-2 通过 ✅；REV-2 整体审查通过（初审 1 阻塞 → T6 修复 → 复审通过，残留 R2-11/R2-12 → T7 修复）✅
+- V-3 证据集：全量 400/0/1skip + `build-app.sh` 构建成功 + 严格签名校验通过 ✅
+- 已按约定安装 /Applications/润物.app 并重启（PID 75201）✅
+- **计划范围完成**。待用户人机复验：A2/A3/A8 真机手测（开关开启→写英文→看校准卡/切换/钉住/复制）、A12 IME 四宿主、A13 provider smoke、A10 一周试用（发行前判据）。
+
 ## 恢复入口
 
-- 下一步：REV-2 整体实现审查（agent）→ V-3 构建（build-app.sh + 签名）→ 按约定安装 /Applications → 用户人机复验。
-- 基线：3cbd28e（分支 codex/caret-translation）。
+- 下一步：用户人机复验；发行（版本号/发行说明/DMG）另行启动。
+- 最终基线：4687755（分支 codex/caret-translation，9 个本地提交，未 push）。
