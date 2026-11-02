@@ -677,6 +677,286 @@ struct OverlayCardContent: Equatable {
     let translation: String
 }
 
+/// English input-calibration card (design 4.3): verdict badge, original
+/// sentence, Chinese back-translation of the original, issue list, corrected
+/// sentence. Mirrors the translation card's shell mechanics (drag catcher,
+/// selectable body top, hover, pin, bottom resize handle, copy feedback) as a
+/// sibling view sharing the same low-level subcomponents, so the translation
+/// card's host type and rendering behavior stay untouched (plan T-03).
+struct CalibrationCardView: View {
+    let verdict: CalibrationVerdict
+    let source: String
+    let fontSize: CGFloat
+    let theme: OverlayTheme
+    let surface: OverlaySurfaceEffect
+    /// When set, the body scrolls inside this fixed height (long issue lists).
+    var textHeightLimit: CGFloat?
+    let contentPinned: Bool
+    var minBodyHeight: CGFloat = 90
+    var maxBodyHeight: CGFloat = .infinity
+    let onClose: () -> Void
+    /// Copies the corrected sentence.
+    let onCopy: () -> Void
+    var onHoverChange: (Bool) -> Void = { _ in }
+    var onResize: (CGFloat) -> Void = { _ in }
+    var onResizeEnd: (CGFloat) -> Void = { _ in }
+    var onTogglePin: () -> Void = {}
+    var feedback: OverlayCardFeedback? = nil
+    var onSelectableBodyTopChange: (CGFloat) -> Void = { _ in }
+    var language: UILanguage = .chinese
+
+    @State private var closeHovered = false
+    @State private var copyHovered = false
+    @State private var copied = false
+    @State private var pinHovered = false
+    @State private var handleHovered = false
+    @State private var handlePressed = false
+    @State private var cardHovered = false
+    @State private var liveLimit: CGFloat?
+    @State private var selectableBodyTop: CGFloat?
+
+    private var effectiveLimit: CGFloat? { liveLimit ?? textHeightLimit }
+    private let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+
+    private var badge: (symbol: String, tint: Color, label: String) {
+        switch verdict.rating {
+        case .good: return ("checkmark.circle", .green, L10n.calibrationVerdictGood(language))
+        case .minor: return ("exclamationmark.triangle", .orange, L10n.calibrationVerdictMinor(language))
+        case .major: return ("xmark.octagon", .red, L10n.calibrationVerdictMajor(language))
+        }
+    }
+
+    private var showsCorrected: Bool {
+        verdict.rating != .good || verdict.corrected != source
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: badge.symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(badge.tint)
+                    .accessibilityLabel(Text(badge.label))
+                Text(L10n.calibrationCardTitle(language))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
+                    .foregroundStyle(theme.accentColor)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Button(action: onTogglePin) {
+                    Image(systemName: contentPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(
+                            contentPinned ? Color.primary : (pinHovered ? Color.primary : Color.secondary))
+                        .frame(width: 22, height: 22)
+                        .background(chipBackground(highlighted: pinHovered))
+                }
+                .buttonStyle(.plain)
+                .opacity(cardHovered || contentPinned ? 1 : 0)
+                .onHover { pinHovered = $0 }
+                .accessibilityLabel(Text("Pin"))
+                Button(action: copyTapped) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(
+                            copied ? theme.accentColor : (copyHovered ? Color.primary : Color.secondary))
+                        .frame(width: 22, height: 22)
+                        .background(chipBackground(highlighted: copyHovered || copied))
+                }
+                .buttonStyle(.plain)
+                .onHover { copyHovered = $0 }
+                .accessibilityLabel(Text("Copy"))
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(closeHovered ? Color.primary : Color.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(chipBackground(highlighted: closeHovered))
+                }
+                .buttonStyle(.plain)
+                .onHover { closeHovered = $0 }
+                .accessibilityLabel(Text("Close"))
+            }
+            calibrationBody
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 13)
+        .frame(minWidth: 340, maxWidth: 600)
+        .coordinateSpace(name: TranslationOverlayView.cardSpace)
+        .onPreferenceChange(SelectableBodyTopKey.self) { value in
+            let boundary = value.boundary
+            guard boundary > 0 else { return }
+            if selectableBodyTop != boundary { selectableBodyTop = boundary }
+            onSelectableBodyTopChange(boundary)
+        }
+        .overlay { WindowDragCatcherRepresentable(
+            onHoverChange: { hovering in
+                cardHovered = hovering
+                onHoverChange(hovering)
+            },
+            onInitialHoverSync: { cardHovered = $0 },
+            excludesHandle: textHeightLimit != nil,
+            pinChipVisible: cardHovered || contentPinned,
+            selectableBodyTop: selectableBodyTop) }
+        .overlay(alignment: .bottom) {
+            if textHeightLimit != nil { resizeHandle }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if let count = feedback?.selectionCopyCount {
+                Text(L10n.overlaySelectionCopied(count, language))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.thinMaterial, in: Capsule())
+                    .overlay(Capsule().stroke(Color.primary.opacity(0.10), lineWidth: 0.5))
+                    .padding(.trailing, 10)
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: feedback?.selectionCopyCount)
+        .background {
+            surfaceShape
+                .overlay {
+                    if theme != .system {
+                        shape.fill(theme.accentColor.opacity(0.10))
+                    }
+                }
+                .overlay { shape.stroke(theme.accentColor.opacity(0.35), lineWidth: 1) }
+        }
+    }
+
+    /// Whole body is selectable; the selectable boundary is the body top.
+    @ViewBuilder private var calibrationBody: some View {
+        let bodyText = VStack(alignment: .leading, spacing: 8) {
+            Text(source)
+                .font(.system(size: fontSize))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+            Divider()
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.calibrationBackTranslationLabel(language))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(verdict.backTranslation)
+                    .font(.system(size: fontSize, weight: .medium))
+            }
+            if verdict.issues.isEmpty {
+                Text(L10n.calibrationNoIssues(language))
+                    .font(.system(size: fontSize - 1))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(verdict.issues) { issue in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("“\(issue.quote)”")
+                                    .font(.system(size: fontSize - 1, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                Text(issue.kind.label)
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        Capsule().fill(theme.accentColor.opacity(0.14)))
+                                    .foregroundStyle(theme.accentColor)
+                            }
+                            Text(issue.reason)
+                                .font(.system(size: fontSize - 1))
+                                .foregroundStyle(.primary)
+                            Text("→ \(issue.fix)")
+                                .font(.system(size: fontSize - 1))
+                                .foregroundStyle(theme.accentColor)
+                        }
+                    }
+                }
+            }
+            if showsCorrected {
+                Divider()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.calibrationCorrectedLabel(language))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(verdict.corrected)
+                        .font(.system(size: fontSize, weight: .medium))
+                }
+            }
+        }
+        .multilineTextAlignment(.leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+        if let limit = effectiveLimit {
+            ScrollView(.vertical) { bodyText }
+                .frame(height: limit)
+                .background(SelectableBodyTopReader(role: .container))
+        } else {
+            bodyText
+                .background(SelectableBodyTopReader(role: .container))
+        }
+    }
+
+    private var resizeHandle: some View {
+        Capsule()
+            .fill(Color.secondary.opacity(handleHovered || handlePressed ? 0.75 : 0.35))
+            .frame(width: 44, height: 5)
+            .padding(.bottom, 3)
+            .frame(height: 18)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                handleHovered = hovering
+                if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let base = liveLimit ?? textHeightLimit ?? 0
+                        handlePressed = true
+                        let newHeight = min(
+                            max(base + value.translation.height, minBodyHeight), maxBodyHeight)
+                        if newHeight != liveLimit {
+                            liveLimit = newHeight
+                            onResize(newHeight)
+                        }
+                    }
+                    .onEnded { _ in
+                        handlePressed = false
+                        if let liveLimit { onResizeEnd(liveLimit) }
+                    }
+            )
+            .onTapGesture(count: 2) {
+                liveLimit = nil
+                if let limit = textHeightLimit { onResize(limit) }
+            }
+    }
+
+    private func chipBackground(highlighted: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color.primary.opacity(highlighted ? 0.09 : 0.05))
+    }
+
+    @ViewBuilder private var surfaceShape: some View {
+        switch surface {
+        case .frost: shape.fill(.regularMaterial)
+        case .glass: shape.fill(.ultraThinMaterial)
+        case .thick: shape.fill(.thickMaterial)
+        case .solid: shape.fill(Color(nsColor: .windowBackgroundColor))
+        }
+    }
+
+    private func copyTapped() {
+        onCopy()
+        copied = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.2))
+            copied = false
+        }
+    }
+}
+
 /// Context of an accepted result, independent of global settings and body
 /// presentation. Clipboard cards retain their original input here even when
 /// the body displays only the translation. No credentials or model snapshot.
@@ -825,6 +1105,9 @@ struct OverlayFollowingLayout {
         let panel: NSPanel
         var text: String
         var sourceText: String?
+        /// Non-nil marks this entry as an English input-calibration card; `text`
+        /// then holds the original sentence (design 4.3).
+        var calibration: CalibrationVerdict?
         var translationContext: OverlayTranslationContext?
         var pendingBackend: TranslationBackend?
         var serviceFailure: String?
@@ -832,6 +1115,7 @@ struct OverlayFollowingLayout {
         let origin: OverlayOrigin
         var inputAnchor: InputAnchor?
         var isRealtime: Bool { if case .realtime = origin { return true }; return false }
+        var isCalibration: Bool { calibration != nil }
         var detached: Bool { contentPinned || (isRealtime && isPinned) }
         var textHeightLimit: CGFloat?
         /// Set when the card scrolls: the panel height is a fixed budget
@@ -856,7 +1140,7 @@ struct OverlayFollowingLayout {
         var moveObserver: NSObjectProtocol?
         init(id: UUID, key: String, panel: NSPanel, screen: NSScreen?, avoid: NSRect?, text: String,
             sourceText: String?, origin: OverlayOrigin, inputAnchor: InputAnchor?,
-            translationContext: OverlayTranslationContext?) {
+            translationContext: OverlayTranslationContext?, calibration: CalibrationVerdict? = nil) {
             self.id = id
             self.key = key
             self.panel = panel
@@ -864,6 +1148,7 @@ struct OverlayFollowingLayout {
             self.avoid = avoid
             self.text = text
             self.sourceText = sourceText
+            self.calibration = calibration
             self.translationContext = translationContext
             self.origin = origin
             self.inputAnchor = inputAnchor
@@ -874,7 +1159,14 @@ struct OverlayFollowingLayout {
     var visiblePanelFrames: [NSRect] { entries.filter { $0.panel.isVisible }.map { $0.panel.frame } }
     /// Debug/diagnostic hook: ids of the entries currently on screen.
     var shownEntryIDs: [UUID] { entries.filter { $0.panel.isVisible }.map(\.id) }
-    var cardContents: [OverlayCardContent] { entries.map { OverlayCardContent(source: $0.sourceText, translation: $0.text) } }
+    var cardContents: [OverlayCardContent] {
+        entries.map {
+            if $0.isCalibration {
+                return OverlayCardContent(source: $0.text, translation: $0.calibration?.corrected ?? "")
+            }
+            return OverlayCardContent(source: $0.sourceText, translation: $0.text)
+        }
+    }
     func translationContext(for id: UUID) -> OverlayTranslationContext? {
         entries.first(where: { $0.id == id })?.translationContext
     }
@@ -920,7 +1212,7 @@ struct OverlayFollowingLayout {
         didSet {
             guard oldValue != selectedService else { return }
             // A global menu checkmark must not remeasure another card's resized body budget.
-            for entry in entries {
+            for entry in entries where !entry.isCalibration {
                 (entry.panel.contentView as? NSHostingView<TranslationOverlayView>)?.rootView =
                     makeView(
                         text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id,
@@ -979,8 +1271,9 @@ struct OverlayFollowingLayout {
     /// overlays that are already on screen.
     func refreshAppearance() {
         for entry in entries {
-            entry.panel.contentView = hostingView(
-                text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
+            entry.panel.contentView = entry.isCalibration
+                ? calibrationHostingView(id: entry.id, textHeightLimit: entry.textHeightLimit)
+                : hostingView(text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
         }
         relayout()
     }
@@ -1001,7 +1294,7 @@ struct OverlayFollowingLayout {
     func show(_ text: String, on screen: NSScreen?) { show(text, key: UUID().uuidString, on: screen) }
     func show(_ text: String, key: String, on screen: NSScreen?, avoid: NSRect? = nil,
         sourceText: String? = nil, origin: OverlayOrigin = .fixed, inputAnchor: InputAnchor? = nil,
-        translationContext: OverlayTranslationContext? = nil) {
+        translationContext: OverlayTranslationContext? = nil, calibration: CalibrationVerdict? = nil) {
         guard !text.isEmpty else {
             if case .realtime = origin { hideRealtime() }
             else { hideFixedUnpinned() }
@@ -1010,6 +1303,7 @@ struct OverlayFollowingLayout {
         if let existing = entries.first(where: { $0.key == key && $0.origin == origin && !$0.detached }) {
             existing.text = text
             existing.sourceText = sourceText
+            existing.calibration = calibration
             existing.translationContext = translationContext
             existing.inputAnchor = inputAnchor
             existing.screen = screen ?? existing.screen ?? NSScreen.main
@@ -1048,7 +1342,8 @@ struct OverlayFollowingLayout {
         panel.alphaValue = CGFloat(min(max(cardOpacity, 0.3), 1))
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let entry = Entry(id: id, key: key, panel: panel, screen: target, avoid: avoid, text: text,
-            sourceText: sourceText, origin: origin, inputAnchor: inputAnchor, translationContext: translationContext)
+            sourceText: sourceText, origin: origin, inputAnchor: inputAnchor, translationContext: translationContext,
+            calibration: calibration)
         entry.moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
         ) { [weak self, weak panel] _ in
@@ -1074,6 +1369,10 @@ struct OverlayFollowingLayout {
     /// Sizes the card for the current text (scrolling when it would exceed the
     /// screen budget) and installs it as the panel's content.
     private func installContent(for entry: Entry) {
+        if entry.isCalibration {
+            installCalibrationContent(for: entry)
+            return
+        }
         let status = entry.pendingBackend.map { L10n.overlayRetranslating($0, uiLanguage) } ?? entry.serviceFailure
         let chrome: CGFloat
         if entry.translationContext != nil || status != nil {
@@ -1100,6 +1399,111 @@ struct OverlayFollowingLayout {
         entry.panel.contentView = hostingView(
             text: entry.text, textHeightLimit: entry.textHeightLimit, id: entry.id)
     }
+
+    /// Sizing + install for calibration cards (design 4.3 / D-C12): segmented
+    /// TextKit measurement plus an unscrolled natural fitting size; over-budget
+    /// cards force a scroll plan instead of trusting `OverlaySizing.plan`'s
+    /// extreme-chrome guard (review N-13/N-21).
+    private func installCalibrationContent(for entry: Entry) {
+        guard let verdict = entry.calibration else { return }
+        let chrome = calibrationChromeHeight()
+        entry.chromeHeight = chrome
+        let segments = [entry.text, verdict.backTranslation, verdict.corrected]
+            + verdict.issues.map { "\($0.quote) \($0.reason) \($0.fix)" }
+        let longest = segments.max(by: { $0.count < $1.count }) ?? entry.text
+        let width = OverlaySizing.measuredContentWidth(text: longest, fontSize: textSize.points)
+        var measured = segments.reduce(CGFloat(0)) { $0 + OverlaySizing.textHeight(text: $1, fontSize: textSize.points, width: width) }
+        // Section labels, dividers, and spacing budget between segments.
+        measured += CGFloat(14 + 16 * verdict.issues.count + (verdict.issues.isEmpty ? 0 : 10))
+        // Natural fitting size must come from a host WITHOUT a scroll limit —
+        // a scrolling host collapses to the viewport height (review N-19).
+        let naturalHost = NSHostingView(
+            rootView: makeCalibrationView(id: entry.id, textHeightLimit: nil, reportsBodyTop: false))
+        measurePanel.contentView = naturalHost
+        naturalHost.layoutSubtreeIfNeeded()
+        let fittingNatural = naturalHost.fittingSize.height
+        measurePanel.contentView = nil
+        let plan = CalibrationCardSizing.plan(
+            measuredNatural: measured + chrome, fittingNatural: fittingNatural,
+            chrome: chrome, limit: cardHeightLimit(on: entry.screen))
+        entry.textHeightLimit = plan.textHeightLimit
+        entry.plannedCardHeight = plan.cardHeight
+        entry.panel.contentView = calibrationHostingView(
+            id: entry.id, textHeightLimit: entry.textHeightLimit)
+    }
+
+    private func calibrationHostingView(id: UUID, textHeightLimit: CGFloat?)
+        -> NSHostingView<CalibrationCardView> {
+        let host = NSHostingView(
+            rootView: makeCalibrationView(id: id, textHeightLimit: textHeightLimit, reportsBodyTop: true))
+        host.sizingOptions = [.intrinsicContentSize]
+        return host
+    }
+
+    private func makeCalibrationView(
+        id: UUID, textHeightLimit: CGFloat?, reportsBodyTop: Bool
+    ) -> CalibrationCardView {
+        let entry = entries.first(where: { $0.id == id })
+        let verdict = entry?.calibration
+        let corrected = verdict?.corrected ?? ""
+        return CalibrationCardView(
+            verdict: verdict ?? CalibrationVerdict(
+                rating: .good, backTranslation: "", corrected: "", issues: []),
+            source: entry?.text ?? "",
+            fontSize: textSize.points,
+            theme: theme,
+            surface: surface,
+            textHeightLimit: textHeightLimit,
+            contentPinned: entry?.contentPinned ?? false,
+            minBodyHeight: 90,
+            maxBodyHeight: max(90, (screenForEntry(id)?.visibleFrame.height ?? 900) - 120),
+            onClose: { [weak self] in self?.remove(id) },
+            onCopy: { [weak self] in
+                _ = TranslationClipboard.copy(corrected)
+                self?.onCopyToPasteboard?(corrected)
+            },
+            onHoverChange: { [weak self] hovering in
+                self?.setHovering(id, hovering)
+            },
+            onResize: { [weak self] bodyHeight in
+                self?.recordResize(of: id, to: bodyHeight)
+            },
+            onResizeEnd: { [weak self] bodyHeight in
+                self?.settleResize(of: id, to: bodyHeight)
+            },
+            onTogglePin: { [weak self] in
+                self?.togglePin(of: id)
+            },
+            feedback: entry?.feedback,
+            onSelectableBodyTopChange: reportsBodyTop
+                ? { [weak self] top in self?.recordSelectableBodyTop(id, top) }
+                : { _ in },
+            language: uiLanguage)
+    }
+
+    /// Header + paddings for the calibration card, measured once like the
+    /// translation chrome (layout constants, no invalidation needed).
+    private func calibrationChromeHeight() -> CGFloat {
+        if let cached = measuredCalibrationChromeHeight { return cached }
+        let host = NSHostingView(
+            rootView: CalibrationCardView(
+                verdict: CalibrationVerdict(
+                    rating: .good, backTranslation: "X", corrected: "X", issues: []),
+                source: "Xg",
+                fontSize: 10,
+                theme: theme,
+                surface: surface,
+                textHeightLimit: 0,
+                contentPinned: false,
+                onClose: {},
+                onCopy: {}))
+        measurePanel.contentView = host
+        host.layoutSubtreeIfNeeded()
+        measuredCalibrationChromeHeight = host.fittingSize.height
+        measurePanel.contentView = nil
+        return measuredCalibrationChromeHeight ?? 64
+    }
+    private var measuredCalibrationChromeHeight: CGFloat?
 
     /// Card height ceiling: roughly 60% of the visible screen so long
     /// translations stay readable instead of spilling past the display edge.
@@ -1371,7 +1775,10 @@ struct OverlayFollowingLayout {
             }
             return
         }
-        let seconds = hideAfter
+        // Calibration cards carry a verdict + issues the user must read; keep
+        // them for at least 10 s even when the translation setting is lower
+        // (design D-C14). `neverHide` already returned above.
+        let seconds = entry.isCalibration ? max(hideAfter, 10) : hideAfter
         entry.hideTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
@@ -1435,6 +1842,15 @@ struct OverlayFollowingLayout {
         anchor: InputAnchor?, translationContext: OverlayTranslationContext? = nil) {
         show(translation, key: key, on: screen(containing: anchor), avoid: anchor?.fieldFrame, sourceText: source,
             origin: .realtime(session), inputAnchor: anchor, translationContext: translationContext)
+    }
+    /// English input-calibration card: realtime origin, no service menu, no
+    /// translation context (design 4.3 / D-C7).
+    func showCalibration(
+        _ verdict: CalibrationVerdict, source: String, key: String, session: InputSessionID,
+        anchor: InputAnchor?
+    ) {
+        show(source, key: key, on: screen(containing: anchor), avoid: anchor?.fieldFrame,
+            origin: .realtime(session), inputAnchor: anchor, calibration: verdict)
     }
     func updateAnchor(_ anchor: InputAnchor, session: InputSessionID) {
         for entry in entries where entry.origin == .realtime(session) && !entry.detached {

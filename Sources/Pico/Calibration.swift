@@ -310,3 +310,29 @@ actor CalibrationCoordinator {
         task = nil
     }
 }
+
+// MARK: - Calibration card sizing (design 4.3, D-C12)
+
+/// Pure sizing policy for calibration cards: `effectiveNatural` is the larger
+/// of the segmented TextKit measurement and the unscrolled natural fitting
+/// size; over-budget cards get an explicit scroll plan whose panel height may
+/// exceed the limit by the extreme-chrome margin instead of clipping the body
+/// (review N-13/N-19/N-21).
+enum CalibrationCardSizing {
+    struct Plan: Equatable {
+        let scrolls: Bool
+        let textHeightLimit: CGFloat?
+        let cardHeight: CGFloat
+    }
+
+    static func plan(
+        measuredNatural: CGFloat, fittingNatural: CGFloat, chrome: CGFloat, limit: CGFloat
+    ) -> Plan {
+        let effective = max(measuredNatural, fittingNatural)
+        guard effective > limit else {
+            return Plan(scrolls: false, textHeightLimit: nil, cardHeight: effective)
+        }
+        let textLimit = max(limit - chrome, 60)
+        return Plan(scrolls: true, textHeightLimit: textLimit, cardHeight: max(limit, chrome + textLimit))
+    }
+}

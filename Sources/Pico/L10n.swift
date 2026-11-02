@@ -352,6 +352,41 @@ enum L10n {
         lang == .chinese ? "预览悬浮窗" : "Preview Overlay"
     }
 
+    // MARK: 英文输入校准
+
+    static func calibrationCardTitle(_ lang: UILanguage) -> String {
+        lang == .chinese ? "英文校准" : "Calibration"
+    }
+    static func calibrationVerdictGood(_ lang: UILanguage) -> String {
+        lang == .chinese ? "表达到位" : "Well expressed"
+    }
+    static func calibrationVerdictMinor(_ lang: UILanguage) -> String {
+        lang == .chinese ? "有小问题" : "Minor issues"
+    }
+    static func calibrationVerdictMajor(_ lang: UILanguage) -> String {
+        lang == .chinese ? "表意有误" : "Meaning affected"
+    }
+    static func calibrationBackTranslationLabel(_ lang: UILanguage) -> String {
+        lang == .chinese ? "回译（这句话实际表达的意思）" : "Back-translation (what it actually says)"
+    }
+    static func calibrationNoIssues(_ lang: UILanguage) -> String {
+        lang == .chinese ? "未发现问题" : "No issues found"
+    }
+    static func calibrationCorrectedLabel(_ lang: UILanguage) -> String {
+        lang == .chinese ? "修正后" : "Corrected"
+    }
+    static func calibrationSettingsTitle(_ lang: UILanguage) -> String {
+        lang == .chinese ? "英文输入校准" : "English Input Calibration"
+    }
+    static func calibrationSettingsFooter(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "检测到纯英文句（拉丁文字，含法/德/西及代码/URL）时，把这句话发送到所配置的语言模型，浮窗显示判定、问题与中文回译。校准卡至少显示 10 秒。需至少一个启用的自定义模型。"
+            : "Pure Latin-script sentences are sent to your configured language models; the overlay shows a verdict, issues, and a Chinese back-translation. Calibration cards stay for at least 10 seconds. Requires one enabled custom model."
+    }
+    static func calibrationNoModelsHint(_ lang: UILanguage) -> String {
+        lang == .chinese ? "未配置启用的模型" : "No enabled model configured"
+    }
+
     // MARK: 使用技巧（悬浮窗页）
 
     // MARK: 辅助功能授权失效提醒
