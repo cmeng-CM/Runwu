@@ -223,7 +223,11 @@ struct MenuBarMenu: View {
             self?.handleInputSnapshot(snapshot, session: session, screen: screen)
         }
         monitor.onAnchorChanged = { [weak self] anchor, session in
-            guard let self, self.realtime.updateAnchor(anchor, session: session) else { return }
+            guard let self else { return }
+            // The calibration card follows the caret like the translation card;
+            // without its own anchor it stays orderOut under follow mode (REV-2 R2-01).
+            _ = self.calibration.updateAnchor(anchor, session: session)
+            guard self.realtime.updateAnchor(anchor, session: session) else { return }
             self.overlay.updateAnchor(anchor, session: session)
         }
         monitor.onFocusChanged = { [weak self] in
@@ -253,7 +257,7 @@ struct MenuBarMenu: View {
             case .translate:
                 self?.translate(text, sentenceKey: sentenceKey, session: session, screen: screen, snapshot: snapshot)
             case .calibrate:
-                self?.calibrate(text, sentenceKey: sentenceKey, session: session, screen: screen)
+                self?.calibrate(text, sentenceKey: sentenceKey, session: session)
             case .none:
                 break
             }
@@ -664,10 +668,11 @@ struct MenuBarMenu: View {
         if realtime.update(snapshot, session: session, language: settings.sourceLanguage) {
             clearRealtimePresentation()
         }
+        let extracted = snapshot.isComposing ? nil : SentenceExtractor().extractSentence(from: snapshot)
         if settings.calibrationEnabled, settings.sourceLanguage == .chinese,
+            let extracted,
             RouteDecision.decide(
-                text: snapshot.isComposing ? "" : (SentenceExtractor().extractSentence(from: snapshot)?.text ?? ""),
-                isTruncated: SentenceExtractor().extractSentence(from: snapshot)?.isTruncated ?? false,
+                text: extracted.text, isTruncated: extracted.isTruncated,
                 sourceLanguage: settings.sourceLanguage, calibrationEnabled: true) == .calibrate,
             calibration.update(snapshot, session: session)
         {
@@ -768,7 +773,7 @@ struct MenuBarMenu: View {
         configureCalibrationCoordinator(revision: revision)
     }
 
-    private func calibrate(_ text: String, sentenceKey: String, session: InputSessionID, screen: NSScreen?) {
+    private func calibrate(_ text: String, sentenceKey: String, session: InputSessionID) {
         guard settings.calibrationEnabled else { return }
         guard let request = calibration.beginRequest(text: text, key: sentenceKey, session: session) else {
             return
@@ -784,7 +789,7 @@ struct MenuBarMenu: View {
             do {
                 let verdict = try await coordinator.calibrateThrowing(text, revision: configuration)
                 self?.acceptCalibrationResult(
-                    verdict, source: text, key: sentenceKey, session: session, screen: screen,
+                    verdict, source: text, key: sentenceKey, session: session,
                     request: request, configuration: configuration)
             } catch {
                 guard self?.calibration.accepts(request) == true,
@@ -799,7 +804,7 @@ struct MenuBarMenu: View {
     /// enabled, generation, state token, current route, session identity.
     private func acceptCalibrationResult(
         _ verdict: CalibrationVerdict, source: String, key sentenceKey: String,
-        session: InputSessionID, screen: NSScreen?, request: CalibrationState.Request,
+        session: InputSessionID, request: CalibrationState.Request,
         configuration: UInt64
     ) {
         guard enabled, configuration == calibrationGeneration, calibration.accepts(request),

@@ -102,13 +102,13 @@ final class CalibrationIntegrationTests: XCTestCase {
     func testRouteSwitchSwapsCardsBetweenTranslationAndCalibration() async throws {
         let app = app(settings(calibrationEnabled: true), engines: [.local: CalibrationStaticEngine("Hello World.")])
         sendLive(app, "你好，世界。", session: liveSession)
-        try await wait { app.overlay.cardContents.count == 1 }
+        try await wait { app.overlay.shownEntryIDs.count == 1 }
         XCTAssertEqual(app.overlay.cardContents.first?.translation, "Hello World.")  // local engine
         sendLive(app, "I have went to school yesterday.", session: liveSession)
-        try await wait { app.overlay.cardContents.first?.translation == "I went to school yesterday." }
+        try await wait { app.overlay.shownEntryIDs.count == 1 && app.overlay.cardContents.first?.translation == "I went to school yesterday." }
         XCTAssertEqual(app.overlay.cardContents.count, 1)  // single active card
         sendLive(app, "你好，再见。", session: liveSession)
-        try await wait { app.overlay.cardContents.first?.translation == "Hello World." }
+        try await wait { app.overlay.shownEntryIDs.count == 1 && app.overlay.cardContents.first?.translation == "Hello World." }
         XCTAssertEqual(app.overlay.cardContents.count, 1)
     }
 
@@ -119,7 +119,7 @@ final class CalibrationIntegrationTests: XCTestCase {
         sendLive(app, "I have went to school yesterday.", session: liveSession)
         try await wait { CalibrationMockURLProtocol.hosts.count >= 1 }
         sendLive(app, "She dont like apples.", session: liveSession)
-        try await wait { app.overlay.cardContents.first?.source == "She dont like apples." }
+        try await wait { app.overlay.shownEntryIDs.count == 1 && app.overlay.cardContents.first?.source == "She dont like apples." }
         XCTAssertEqual(app.overlay.cardContents.first?.translation, "She dont like apples.")  // good verdict
         XCTAssertEqual(app.overlay.cardContents.count, 1)
         XCTAssertEqual(CalibrationMockURLProtocol.hosts.count, 2)
@@ -159,7 +159,7 @@ final class CalibrationIntegrationTests: XCTestCase {
         settingsStore.llmModels = [CalibrationMockURLProtocol.model()]
         settingsStore.translationBackend = .local  // model change → affectsCalibration → reconfigure
         sendLive(app, "She dont like apples.", session: liveSession)
-        try await wait { app.overlay.cardContents.first?.source == "She dont like apples." }
+        try await wait { app.overlay.shownEntryIDs.count == 1 && app.overlay.cardContents.first?.source == "She dont like apples." }
         XCTAssertNil(app.calibrationFailure)
     }
 
