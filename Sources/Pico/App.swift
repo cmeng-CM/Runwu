@@ -231,7 +231,8 @@ struct MenuBarMenu: View {
             guard let self else { return }
             self.history.reload(retention: self.settings.historyRetention)
         }
-        input.onSentence = { [weak self] text, sentenceKey, session, screen, snapshot in
+        input.onSentence = { [weak self] text, sentenceKey, session, screen, snapshot, route in
+            guard route != .calibrate else { return }  // calibration wiring lands in a later task
             self?.translate(text, sentenceKey: sentenceKey, session: session, screen: screen, snapshot: snapshot)
         }
         input.onEmpty = { [weak self] in
@@ -355,7 +356,8 @@ struct MenuBarMenu: View {
         cancelAllCardRequests()
         clipboardRequestID = nil
         invalidateRealtime(clearAnchor: true, preservingEntry: preservedServiceCard)
-        input.setSourceLanguage(source)
+        if input.sourceLanguage != source { input.setSourceLanguage(source) }
+        else { input.flushForConfigurationChange() }
         monitor.sourceLanguage = source
         translationHolder.configure(source: source, target: target)
         clearPendingAction()

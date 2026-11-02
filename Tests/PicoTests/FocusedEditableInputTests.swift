@@ -160,7 +160,7 @@ import XCTest
             var emitted: [InputSessionID] = []
             monitor.onFocusChanged = { input.reset() }
             monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
-            input.onSentence = { _, _, session, _, _ in emitted.append(session) }
+            input.onSentence = { _, _, session, _, _, _ in emitted.append(session) }
             monitor.readSnapshot()
             let old = try XCTUnwrap(monitor.snapshotNow()).session
             let reads = fixture.contentReads.count
@@ -230,7 +230,7 @@ import XCTest
             fixture.nodes[fixture.first]?.focused = false
             input.timing = timing; input.delayMilliseconds = 10
             var requests = 0
-            input.onSentence = { _, _, _, _, _ in requests += 1 }
+            input.onSentence = { _, _, _, _, _, _ in requests += 1 }
             monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
             monitor.onFocusChanged = { input.reset() }
             monitor.readSnapshot()

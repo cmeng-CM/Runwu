@@ -149,7 +149,7 @@ final class CaretTrackingTests: XCTestCase {
             states.append(snapshot.isComposing)
             input.handle(snapshot, session: session, screen: screen)
         }
-        input.onSentence = { text, _, _, _, _ in translated.append(text) }
+        input.onSentence = { text, _, _, _, _, _ in translated.append(text) }
         monitor.readSnapshot()
         fixture.marked = NSRange(location: 2, length: 2)
         monitor.readSnapshot()
@@ -173,7 +173,7 @@ final class CaretTrackingTests: XCTestCase {
             monitor.onFocusChanged = { input.reset() }
             monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
             monitor.onAnchorChanged = { _, session in anchors.append(session) }
-            input.onSentence = { _, _, session, _, _ in emitted.append(session) }
+            input.onSentence = { _, _, session, _, _, _ in emitted.append(session) }
             monitor.readSnapshot() // Queue a request from a trusted sample.
             let oldSession = anchors.last
             let reads = fixture.contentReads
@@ -202,7 +202,7 @@ final class CaretTrackingTests: XCTestCase {
             var emitted = 0
             monitor.onFocusChanged = { input.reset() }
             monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
-            input.onSentence = { _, _, _, _, _ in emitted += 1 }
+            input.onSentence = { _, _, _, _, _, _ in emitted += 1 }
             fixture.marked = NSRange(location: 2, length: 2)
             monitor.readSnapshot()
             fixture.errors["AXTextInputMarkedRange"] = .cannotComplete
@@ -535,7 +535,7 @@ final class CaretTrackingTests: XCTestCase {
         monitor.onFocusChanged = { input.reset() }
         monitor.onSnapshot = { input.handle($0, session: $1, screen: $2) }
         var emitted = 0
-        input.onSentence = { _, _, _, _, _ in emitted += 1 }
+        input.onSentence = { _, _, _, _, _, _ in emitted += 1 }
         monitor.readSnapshot()
         let reads = fixture.contentReads
         fixture.markedReadResult = .unavailable(.cannotComplete)

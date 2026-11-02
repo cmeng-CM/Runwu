@@ -13,7 +13,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
             let composing = TextSnapshot(pid: 1, bundleIdentifier: "test.input", text: "拼音候选。",
                 selectedRange: NSRange(location: 5, length: 0), isComposing: true)
             var received: [String] = []
-            input.onSentence = { text, _, _, _, _ in received.append(text) }
+            input.onSentence = { text, _, _, _, _, _ in received.append(text) }
             input.handle(composing, session: session, screen: nil)
             input.translateNow(composing, session: session, screen: nil)
             try? await Task.sleep(for: .milliseconds(70))
@@ -27,7 +27,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         let input = InputCoordinator()
         input.timing = .completeSentence
         var sessions: [InputSessionID] = []
-        input.onSentence = { _, _, session, _, _ in sessions.append(session) }
+        input.onSentence = { _, _, session, _, _, _ in sessions.append(session) }
         let first = InputSessionID(pid: 1), second = InputSessionID(pid: 1)
         input.handle(snapshot("两个输入框同样内容。"), session: first, screen: nil)
         input.handle(snapshot("两个输入框同样内容。"), session: second, screen: nil)
@@ -39,7 +39,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         input.delayMilliseconds = 20
         let session = InputSessionID(pid: 1)
         var received: [String] = []
-        input.onSentence = { text, _, _, _, _ in received.append(text) }
+        input.onSentence = { text, _, _, _, _, _ in received.append(text) }
         input.handle(snapshot("待翻译内容。"), session: session, screen: nil)
         input.excludedBundleIDs = ["test.input"]
         try? await Task.sleep(for: .milliseconds(70))
@@ -58,7 +58,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         input.delayMilliseconds = 20
         let session = InputSessionID(pid: 1)
         var received: String?
-        input.onSentence = { text, _, _, _, _ in received = text }
+        input.onSentence = { text, _, _, _, _, _ in received = text }
         input.handle(snapshot("我今天会晚一点"), session: session, screen: nil)
         XCTAssertNil(received)
         try? await Task.sleep(for: .milliseconds(80))
@@ -71,7 +71,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         input.delayMilliseconds = 20
         let session = InputSessionID(pid: 1)
         var received: String?
-        input.onSentence = { text, _, _, _, _ in received = text }
+        input.onSentence = { text, _, _, _, _, _ in received = text }
         input.handle(snapshot("我今天会晚一点"), session: session, screen: nil)
         XCTAssertNil(received)
         try? await Task.sleep(for: .milliseconds(80))
@@ -84,7 +84,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         input.delayMilliseconds = 200
         let session = InputSessionID(pid: 1)
         var received: String?
-        input.onSentence = { text, _, _, _, _ in received = text }
+        input.onSentence = { text, _, _, _, _, _ in received = text }
         input.handle(snapshot("我今天会晚一点。"), session: session, screen: nil)
         XCTAssertEqual(received, "我今天会晚一点。")
     }
@@ -95,7 +95,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         input.delayMilliseconds = 20
         let session = InputSessionID(pid: 1)
         var received: String?
-        input.onSentence = { text, _, _, _, _ in received = text }
+        input.onSentence = { text, _, _, _, _, _ in received = text }
         input.handle(snapshot("我今天会晚一点。"), session: session, screen: nil)
         try? await Task.sleep(for: .milliseconds(80))
         XCTAssertNil(received)
@@ -114,7 +114,7 @@ final class InputCoordinatorTimingTests: XCTestCase {
         input.timing = .shortcut
         let session = InputSessionID(pid: 1)
         var received: String?
-        input.onSentence = { text, _, _, _, _ in received = text }
+        input.onSentence = { text, _, _, _, _, _ in received = text }
         input.translateNow(live, session: session, screen: nil)
         XCTAssertNil(received)
         input.translateNow(recovered, session: session, screen: nil)

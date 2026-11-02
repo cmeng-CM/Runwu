@@ -90,6 +90,14 @@ public struct TextSnapshot: Sendable {
 public struct ExtractedSentence: Equatable, Sendable {
     public let text: String
     public let range: NSRange
+    /// True when the extractor trimmed the fragment to its trailing `maxLength`
+    /// characters. Calibration skips truncated sentences (design D-C14).
+    public let isTruncated: Bool
+    init(text: String, range: NSRange, isTruncated: Bool = false) {
+        self.text = text
+        self.range = range
+        self.isTruncated = isTruncated
+    }
     func key(in session: InputSessionID) -> String { "\(session.token.uuidString):\(range.location)" }
 }
 
@@ -113,10 +121,12 @@ public struct SentenceExtractor: Sendable {
         var range = Self.fragment(in: text, caret: caret)
         if range.isEmpty { range = Self.previousSentence(in: text, before: caret) ?? range }
         guard !range.isEmpty else { return nil }
+        var truncated = false
         if text[range].count > maxLength {
             range = text.index(range.upperBound, offsetBy: -maxLength)..<range.upperBound
+            truncated = true
         }
-        return ExtractedSentence(text: String(text[range]), range: NSRange(range, in: text))
+        return ExtractedSentence(text: String(text[range]), range: NSRange(range, in: text), isTruncated: truncated)
     }
 
     public func isComplete(_ snapshot: TextSnapshot) -> Bool {

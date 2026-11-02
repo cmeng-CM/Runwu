@@ -55,6 +55,7 @@ public struct InputSessionID: Hashable, Sendable {
     private var diagnosticSuppression: InputDiagnosticReason?
     var isEnabled = true
     var sourceLanguage: Language = .chinese
+    var calibrationEnabled = false
     var excludedBundleIDs: Set<String> = []
     var delayMilliseconds: Int {
         get {
@@ -69,10 +70,24 @@ public struct InputSessionID: Hashable, Sendable {
             if timing != .pause { debouncer.cancel(reason: .timingChanged) }
         }
     }
-    var onSentence: ((String, String, InputSessionID, NSScreen?, TextSnapshot) -> Void)?, onEmpty: (() -> Void)?
+    var onSentence: ((String, String, InputSessionID, NSScreen?, TextSnapshot, Route) -> Void)?, onEmpty: (() -> Void)?
+    var onRouteChanged: ((Route, InputSessionID) -> Void)?
+    private var lastRoute: Route?
     func setSourceLanguage(_ language: Language) {
+        guard sourceLanguage != language else { return }
         sourceLanguage = language
         reset(reason: .sourceLanguageChanged)
+    }
+    /// Clears dedup/debounce state without the onEmpty side effect of reset(),
+    /// so a settings change can re-request the same sentence without tearing
+    /// down the other pipeline through onEmpty → invalidateRealtime (design 4.4).
+    func flushForConfigurationChange() {
+        debouncer.cancel(reason: .sourceLanguageChanged)
+        session = nil
+        observedSentence = nil
+        lastSentence = ""
+        lastSentenceKey = ""
+        lastRoute = nil
     }
     func handle(_ snapshot: TextSnapshot, session: InputSessionID, screen: NSScreen?) {
         DiagnosticLog.write(
@@ -112,6 +127,7 @@ public struct InputSessionID: Hashable, Sendable {
             return
         }
         diagnosticSuppression = nil
+        updateRoute(for: snapshot, session: session)
         switch timing {
         case .pause:
             debouncer.submit(snapshot, session: session) { [weak self] snapshot in
@@ -140,7 +156,23 @@ public struct InputSessionID: Hashable, Sendable {
         self.session = session
         observe(snapshot)
         diagnosticSuppression = nil
+        updateRoute(for: snapshot, session: session)
         emit(snapshot, session: session, screen: screen, force: true)
+    }
+
+    /// Route changes fire on every snapshot, before any debounce, so a card from
+    /// the previous route is dismissed within the same input event (design 4.1, N-17).
+    private func updateRoute(for snapshot: TextSnapshot, session: InputSessionID) {
+        guard let extracted = extractor.extractSentence(from: snapshot) else { return }
+        let route = RouteDecision.decide(
+            text: extracted.text, isTruncated: extracted.isTruncated,
+            sourceLanguage: sourceLanguage, calibrationEnabled: calibrationEnabled)
+        guard route != lastRoute else { return }
+        lastRoute = route
+        DiagnosticLog.write(
+            "calibration route=\(route) bundle=\(snapshot.bundleIdentifier ?? "unknown")"
+                + " pid=\(session.pid) session=\(session.token.uuidString)")
+        onRouteChanged?(route, session)
     }
     func reset(reason: InputDiagnosticReason = .reset) {
         if let session {
@@ -152,6 +184,7 @@ public struct InputSessionID: Hashable, Sendable {
         observedSentence = nil
         lastSentence = ""
         lastSentenceKey = ""
+        lastRoute = nil
         onEmpty?()
     }
 
@@ -188,15 +221,24 @@ public struct InputSessionID: Hashable, Sendable {
             return
         }
         let sentence = extracted.text
+        let route = RouteDecision.decide(
+            text: sentence, isTruncated: extracted.isTruncated,
+            sourceLanguage: sourceLanguage, calibrationEnabled: calibrationEnabled)
         DiagnosticLog.write(
             "debounce fired sentenceLength=\(sentence.count) source=\(sourceLanguage.rawValue) matches=\(detector.contains(sentence, language: sourceLanguage))")
         logger.info(
-            "debounce fired sentenceLength=\(sentence.count, privacy: .public) source=\(self.sourceLanguage.rawValue, privacy: .public) matches=\(self.detector.contains(sentence, language: self.sourceLanguage), privacy: .public)"
+            "debounce fired sentenceLength=\(sentence.count, privacy: .public) source=\(self.sourceLanguage.rawValue, privacy: .public) matches=\(self.detector.contains(sentence, language: self.sourceLanguage), privacy: .public)}"
         )
-        guard !sentence.isEmpty, detector.contains(sentence, language: sourceLanguage) else {
+        guard !sentence.isEmpty, route != .none else {
             let reason: InputDiagnosticReason = sentence.isEmpty ? .extractionEmpty : .sourceLanguageMismatch
             DiagnosticLog.write("sentence skipped reason=\(reason.rawValue) "
                 + InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session))
+            if route == .none, !sentence.isEmpty, calibrationEnabled, sourceLanguage == .chinese,
+                extracted.isTruncated
+            {
+                DiagnosticLog.write("calibration skipped reason=tooLong "
+                    + InputDiagnostic.identity(bundle: snapshot.bundleIdentifier, session: session))
+            }
             return
         }
         let sentenceKey = extracted.key(in: session)
@@ -208,7 +250,7 @@ public struct InputSessionID: Hashable, Sendable {
         }
         lastSentence = sentence
         lastSentenceKey = sentenceKey
-        onSentence?(sentence, sentenceKey, session, screen, snapshot)
+        onSentence?(sentence, sentenceKey, session, screen, snapshot, route)
     }
 }
 

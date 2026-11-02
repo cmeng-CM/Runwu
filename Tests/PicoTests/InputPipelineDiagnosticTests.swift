@@ -11,7 +11,7 @@ final class InputPipelineDiagnosticTests: XCTestCase {
         input.delayMilliseconds = 20
         connect(monitor, to: input)
         var emitted: [String] = [], sessions: [InputSessionID] = []
-        input.onSentence = { text, _, session, _, _ in emitted.append(text); sessions.append(session) }
+        input.onSentence = { text, _, session, _, _, _ in emitted.append(text); sessions.append(session) }
         monitor.readSnapshot()
         fixture.marked = NSRange(location: 2, length: 2)
         monitor.readSnapshot()
@@ -39,7 +39,7 @@ final class InputPipelineDiagnosticTests: XCTestCase {
         let boundary = beginLogCapture(), input = InputCoordinator(), session = InputSessionID(pid: 1)
         input.delayMilliseconds = 20
         var emitted: [String] = []
-        input.onSentence = { text, _, _, _, _ in emitted.append(text) }
+        input.onSentence = { text, _, _, _, _, _ in emitted.append(text) }
         input.handle(snapshot("旧句子。"), session: session, screen: nil)
         input.handle(snapshot("新句子。"), session: session, screen: nil)
         try await Task.sleep(for: .milliseconds(70))
@@ -80,7 +80,7 @@ final class InputPipelineDiagnosticTests: XCTestCase {
         let boundary = beginLogCapture(), input = InputCoordinator(), session = InputSessionID(pid: 1)
         input.delayMilliseconds = 20
         var emitted: [String] = []
-        input.onSentence = { text, _, _, _, _ in emitted.append(text) }
+        input.onSentence = { text, _, _, _, _, _ in emitted.append(text) }
         // Nonempty document, but no extractable sentence at the leading blank line.
         let blankLine = TextSnapshot(pid: 1, bundleIdentifier: "test.input", text: "\n\n后面的句子。",
             selectedRange: NSRange(location: 0, length: 0))
@@ -235,7 +235,7 @@ final class InputPipelineDiagnosticTests: XCTestCase {
             snapshots += 1
             input.handle(snapshot, session: session, screen: screen)
         }
-        input.onSentence = { _, _, _, _, _ in emitted += 1 }
+        input.onSentence = { _, _, _, _, _, _ in emitted += 1 }
         monitor.readSnapshot()
         let contentReads = fixture.contentReads
         rejectAfterRead = true

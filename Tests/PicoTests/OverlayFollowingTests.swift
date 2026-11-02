@@ -177,7 +177,7 @@ final class OverlayFollowingTests: XCTestCase {
         input.timing = .completeSentence
         let session = InputSessionID(pid: 1), text = "重复。重复。"
         var keys: [String] = []
-        input.onSentence = { _, key, _, _, _ in keys.append(key) }
+        input.onSentence = { _, key, _, _, _, _ in keys.append(key) }
         input.handle(snapshot(text, caret: 3), session: session, screen: nil)
         input.handle(snapshot(text, caret: 6), session: session, screen: nil)
         XCTAssertEqual(keys, ["\(session.token.uuidString):0", "\(session.token.uuidString):3"])
