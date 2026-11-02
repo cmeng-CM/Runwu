@@ -1865,6 +1865,11 @@ struct OverlayFollowingLayout {
     func hideRealtime(except preservedID: UUID? = nil) {
         for id in entries.filter({ $0.isRealtime && !$0.detached && $0.id != preservedID }).map(\.id) { remove(id) }
     }
+    /// Removes only the unpinned realtime calibration card, leaving any
+    /// translation realtime card alone (same-route new sentence, review N-11).
+    func hideRealtimeCalibration() {
+        for id in entries.filter({ $0.isCalibration && $0.isRealtime && !$0.detached }).map(\.id) { remove(id) }
+    }
     private func hideFixedUnpinned() {
         for id in entries.filter({ !$0.isRealtime && !$0.contentPinned }).map(\.id) { remove(id) }
     }

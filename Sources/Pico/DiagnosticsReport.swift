@@ -27,6 +27,8 @@ struct DiagnosticsSnapshot {
     var clipboardEnabled: Bool
     var clipboardTriggerRaw: String
     var excludedBundleIDs: [String]
+    var calibrationEnabled: Bool
+    var calibrationPromptVersion: String
     var generatedAt: Date
 }
 
@@ -75,6 +77,8 @@ enum DiagnosticsReport {
             "ui_language: \(snapshot.uiLanguage)",
             "clipboard_translation_enabled: \(snapshot.clipboardEnabled)",
             "clipboard_trigger: \(snapshot.clipboardTriggerRaw)",
+            "calibration_enabled: \(snapshot.calibrationEnabled)",
+            "calibration_prompt_version: \(snapshot.calibrationPromptVersion)",
             "excluded_apps: \(snapshot.excludedBundleIDs.isEmpty ? "(none)" : snapshot.excludedBundleIDs.joined(separator: ", "))",
         ]
         lines.append(String(repeating: "=", count: 60))

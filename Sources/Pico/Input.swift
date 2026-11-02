@@ -73,6 +73,8 @@ public struct InputSessionID: Hashable, Sendable {
     var onSentence: ((String, String, InputSessionID, NSScreen?, TextSnapshot, Route) -> Void)?, onEmpty: (() -> Void)?
     var onRouteChanged: ((Route, InputSessionID) -> Void)?
     private var lastRoute: Route?
+    /// Current routing decision, for the accept-side guard (design 5.2).
+    var currentRoute: Route? { lastRoute }
     func setSourceLanguage(_ language: Language) {
         guard sourceLanguage != language else { return }
         sourceLanguage = language

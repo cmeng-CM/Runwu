@@ -13,7 +13,7 @@ final class DiagnosticsReportTests: XCTestCase {
             weChatVersion: "4.1.5.16", enabled: true, timingRaw: "pause", speedMilliseconds: 450,
             sourceLanguage: "zh", targetLanguage: "en", backendRaw: "local", llmModelCount: 0,
             uiLanguage: "zh", clipboardEnabled: true, clipboardTriggerRaw: "auto-watch",
-            excludedBundleIDs: ["com.comeg.runwu"], generatedAt: Date(timeIntervalSince1970: 1_789_000_000))
+            excludedBundleIDs: ["com.comeg.runwu"], calibrationEnabled: false, calibrationPromptVersion: "cal-v1", generatedAt: Date(timeIntervalSince1970: 1_789_000_000))
     }
 
     func testRenderContainsKeyDiagnosticLines() {

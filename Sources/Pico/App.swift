@@ -108,6 +108,17 @@ struct MenuBarMenu: View {
     private let speechPolicy = SpeechPolicyEvaluator()
     private let hotKey = GlobalHotKey.shared
     private let realtime = RealtimeTranslationState()
+    private let calibration = CalibrationState()
+    private var calibrationGeneration: UInt64 = 0
+    private var calibrationConfigurationTask: Task<Void, Never>?
+    private var calibrationCoordinator = CalibrationCoordinator()
+    private let calibrationSession: URLSession
+    /// Calibration failures surface through their own notice channel; the
+    /// translation failure notice keeps its "实时翻译" title (design 4.3, B-09).
+    @Published var calibrationFailure: String?
+    private let calibrationFailureNotice = TranslationFailureNotice()
+    /// Last route observed via onRouteChanged; drives directional cleanup.
+    private var lastRoute: Route?
     private var configurationGeneration: UInt64 = 0
     private var configurationTask: Task<Void, Never>?
     private var overlayLanguageObservation: AnyCancellable?
@@ -146,7 +157,8 @@ struct MenuBarMenu: View {
         speech suppliedSpeech: (any SpeechPerforming)? = nil,
         clipboardReader: any PasteboardReading = SystemPasteboard(),
         frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
-        settingsDockController: SettingsDockController = .shared) {
+        settingsDockController: SettingsDockController = .shared,
+        calibrationSession: URLSession = .shared) {
         let enabledValue = store.enabled
         let trustedValue = startRuntime && AXIsProcessTrusted()
         let welcomeValue = startRuntime && !UserDefaults.standard.bool(forKey: "onboardingComplete")
@@ -161,6 +173,9 @@ struct MenuBarMenu: View {
         settings = store
         self.settingsDockController = settingsDockController
         self.clipboardReader = clipboardReader
+        self.calibrationSession = calibrationSession
+        calibrationCoordinator = CalibrationCoordinator(
+            models: store.llmModels, timeoutSeconds: store.llmFallbackTimeout, session: calibrationSession)
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         pasteboardWatcher = PasteboardWatcher(pasteboard: clipboardReader)
         runtimeEnabled = startRuntime
@@ -185,6 +200,7 @@ struct MenuBarMenu: View {
         input.delayMilliseconds = settings.translationSpeed
         input.sourceLanguage = settings.sourceLanguage
         input.timing = settings.translationTiming
+        input.calibrationEnabled = settings.calibrationEnabled
         overlay.hideAfter = settings.hideAfter
         overlay.neverHide = settings.neverHide
         overlay.textSize = settings.textSize
@@ -211,13 +227,14 @@ struct MenuBarMenu: View {
             self.overlay.updateAnchor(anchor, session: session)
         }
         monitor.onFocusChanged = { [weak self] in
-            self?.invalidateRealtime(clearAnchor: true)
+            self?.invalidateRealtime(clearAnchor: true, alsoClearCalibration: true)
             self?.input.reset()
         }
         input.excludedBundleIDs = settings.excludedBundleIDs
         monitor.excludedBundleIDs = settings.excludedBundleIDs
         monitor.sourceLanguage = settings.sourceLanguage
         settings.onTranslationSettingsChanged = { [weak self] in self?.applyTranslationSettings() }
+        settings.onCalibrationSettingsChanged = { [weak self] in self?.applyCalibrationSettings() }
         settings.onOverlayFollowCaretChanged = { [weak self] in
             guard let self else { return }
             self.overlay.followCaret = self.settings.overlayFollowCaret
@@ -232,12 +249,22 @@ struct MenuBarMenu: View {
             self.history.reload(retention: self.settings.historyRetention)
         }
         input.onSentence = { [weak self] text, sentenceKey, session, screen, snapshot, route in
-            guard route != .calibrate else { return }  // calibration wiring lands in a later task
-            self?.translate(text, sentenceKey: sentenceKey, session: session, screen: screen, snapshot: snapshot)
+            switch route {
+            case .translate:
+                self?.translate(text, sentenceKey: sentenceKey, session: session, screen: screen, snapshot: snapshot)
+            case .calibrate:
+                self?.calibrate(text, sentenceKey: sentenceKey, session: session, screen: screen)
+            case .none:
+                break
+            }
+        }
+        input.onRouteChanged = { [weak self] route, session in
+            self?.handleRouteChanged(route, session: session)
         }
         input.onEmpty = { [weak self] in
             guard let self else { return }
-            self.invalidateRealtime(preservingEntry: self.preservedServiceCard)
+            self.invalidateRealtime(
+                preservingEntry: self.preservedServiceCard, alsoClearCalibration: true)
         }
         guard startRuntime else { return }
         if permissionGranted && enabled {
@@ -350,14 +377,23 @@ struct MenuBarMenu: View {
         let backend = settings.translationBackend
         let timeout = settings.llmFallbackTimeout
         let models = settings.llmModels
+        // Calibration only cares about source/models/timeout; target/backend
+        // changes must not cancel an in-flight calibration (design 4.4, N-14).
+        let calibrationAffecting = (source: source, models: models, timeout: timeout)
+        let affectsCalibration =
+            lastCalibrationAffectingSettings.map { $0 != calibrationAffecting } ?? true
+        lastCalibrationAffectingSettings = calibrationAffecting
         configurationGeneration &+= 1
         let revision = configurationGeneration
         let previousConfiguration = configurationTask
         cancelAllCardRequests()
         clipboardRequestID = nil
-        invalidateRealtime(clearAnchor: true, preservingEntry: preservedServiceCard)
+        invalidateRealtime(
+            clearAnchor: true, preservingEntry: preservedServiceCard,
+            alsoClearCalibration: affectsCalibration)
         if input.sourceLanguage != source { input.setSourceLanguage(source) }
         else { input.flushForConfigurationChange() }
+        input.calibrationEnabled = settings.calibrationEnabled
         monitor.sourceLanguage = source
         translationHolder.configure(source: source, target: target)
         clearPendingAction()
@@ -376,7 +412,13 @@ struct MenuBarMenu: View {
             guard self?.configurationGeneration == revision else { return }
             await service.configure(backend: backend, models: models, timeoutSeconds: timeout, revision: revision)
         }
+        if affectsCalibration {
+            calibrationGeneration &+= 1
+            configureCalibrationCoordinator(revision: calibrationGeneration)
+        }
     }
+    private var lastCalibrationAffectingSettings:
+        (source: Language, models: [LLMModelConfiguration], timeout: Double)?
     private func configurationReady(_ revision: UInt64) async -> Bool {
         let barrier = configurationTask
         await barrier?.value
@@ -461,6 +503,7 @@ struct MenuBarMenu: View {
         enabled.toggle()
         settings.enabled = enabled
         input.isEnabled = enabled
+        if !enabled { invalidateCalibrationState() }
         // Pause and resume are request revisions too. Publish matching
         // coordinator/service revisions through the same readiness barrier.
         applyTranslationSettings()
@@ -515,6 +558,8 @@ struct MenuBarMenu: View {
             clipboardEnabled: settings.clipboardTranslationEnabled,
             clipboardTriggerRaw: settings.clipboardTriggerMode.rawValue,
             excludedBundleIDs: settings.excludedBundleIDs.sorted(),
+            calibrationEnabled: settings.calibrationEnabled,
+            calibrationPromptVersion: LLMCalibrationPrompt.version,
             generatedAt: Date())
         let content = DiagnosticsReport.render(
             snapshot: snapshot, recentLog: DiagnosticLog.recentLines(),
@@ -619,16 +664,30 @@ struct MenuBarMenu: View {
         if realtime.update(snapshot, session: session, language: settings.sourceLanguage) {
             clearRealtimePresentation()
         }
+        if settings.calibrationEnabled, settings.sourceLanguage == .chinese,
+            RouteDecision.decide(
+                text: snapshot.isComposing ? "" : (SentenceExtractor().extractSentence(from: snapshot)?.text ?? ""),
+                isTruncated: SentenceExtractor().extractSentence(from: snapshot)?.isTruncated ?? false,
+                sourceLanguage: settings.sourceLanguage, calibrationEnabled: true) == .calibrate,
+            calibration.update(snapshot, session: session)
+        {
+            // Same-route new sentence: the old card leaves now, not when the
+            // new verdict arrives (design 4.1, review B-03/N-11).
+            dismissCalibrationCard()
+        }
         if feedInput { input.handle(snapshot, session: session, screen: screen) }
     }
-    private func invalidateRealtime(clearAnchor: Bool = false, preservingEntry: UUID? = nil) {
+    private func invalidateRealtime(
+        clearAnchor: Bool = false, preservingEntry: UUID? = nil, alsoClearCalibration: Bool = false
+    ) {
         realtime.invalidate(clearAnchor: clearAnchor)
-        clearRealtimePresentation(preservingEntry: preservingEntry)
+        clearRealtimePresentation(preservingEntry: preservingEntry, alsoClearCalibration: alsoClearCalibration)
     }
-    private func clearRealtimePresentation(preservingEntry: UUID? = nil) {
+    private func clearRealtimePresentation(preservingEntry: UUID? = nil, alsoClearCalibration: Bool = false) {
         clearFailure(realtime: true)
         if case .realtime = pendingOrigin { clearPendingAction() }
         overlay.hideRealtime(except: preservingEntry)
+        if alsoClearCalibration { invalidateCalibrationState() }
         speech.stop()
         let mutation = realtime.mutationID
         let coordinator = coordinator
@@ -636,6 +695,130 @@ struct MenuBarMenu: View {
             guard self?.realtime.mutationID == mutation else { return }
             await coordinator.cancel()
         }
+    }
+
+    /// Route changes fire before any debounce (design 4.1, review N-17).
+    private func handleRouteChanged(_ route: Route, session: InputSessionID) {
+        guard enabled else { return }
+        guard lastRoute != route else { return }
+        lastRoute = route
+        switch route {
+        case .calibrate:
+            // Only the translation side is cleared here: the calibration state
+            // for the sentence that just arrived must survive (review N-12).
+            // hideRealtime inside also takes down the old calibration card,
+            // which is the desired behavior (review N-18).
+            clearRealtimePresentation()
+        case .translate:
+            invalidateCalibrationState()
+        case .none:
+            clearRealtimePresentation(alsoClearCalibration: true)
+        }
+    }
+
+    /// Same-route new sentence: take the old calibration card away but keep the
+    /// freshly written state (review N-11). The in-flight request is NOT
+    /// cancelled here — the next `calibrateThrowing` supersedes it inside the
+    /// coordinator, and cancelling now would race the request that the debounced
+    /// emission is about to issue.
+    private func dismissCalibrationCard() {
+        overlay.hideRealtimeCalibration()
+    }
+
+    /// Leaving calibration (route, focus, empty input, pause, settings):
+    /// invalidate the token state, remove the card, cancel in-flight work,
+    /// clear the failure notice.
+    private func invalidateCalibrationState() {
+        calibration.invalidate()
+        dismissCalibrationCard()
+        Task { [calibrationCoordinator] in await calibrationCoordinator.cancel() }
+        clearCalibrationFailure()
+    }
+
+    private func clearCalibrationFailure() {
+        calibrationFailure = nil
+        calibrationFailureNotice.hide()
+    }
+
+    private func calibrationConfigurationReady(_ revision: UInt64) async -> Bool {
+        let barrier = calibrationConfigurationTask
+        await barrier?.value
+        return enabled && calibrationGeneration == revision && !Task.isCancelled
+    }
+
+    private func configureCalibrationCoordinator(revision: UInt64) {
+        let models = settings.llmModels
+        let timeout = settings.llmFallbackTimeout
+        let previous = calibrationConfigurationTask
+        let coordinator = calibrationCoordinator
+        calibrationConfigurationTask = Task {
+            await previous?.value
+            await coordinator.reconfigure(models: models, timeoutSeconds: timeout, revision: revision)
+        }
+    }
+
+    /// Switch changes and model/timeout/source changes bump an independent
+    /// `calibrationGeneration`; translation's generation is untouched.
+    func applyCalibrationSettings() {
+        calibrationGeneration &+= 1
+        let revision = calibrationGeneration
+        input.calibrationEnabled = settings.calibrationEnabled
+        lastRoute = nil
+        invalidateCalibrationState()
+        configureCalibrationCoordinator(revision: revision)
+    }
+
+    private func calibrate(_ text: String, sentenceKey: String, session: InputSessionID, screen: NSScreen?) {
+        guard settings.calibrationEnabled else { return }
+        guard let request = calibration.beginRequest(text: text, key: sentenceKey, session: session) else {
+            return
+        }
+        let configuration = calibrationGeneration
+        clearCalibrationFailure()
+        DiagnosticLog.write(
+            "calibration requested length=\(text.count) promptVersion=\(LLMCalibrationPrompt.version)")
+        let coordinator = calibrationCoordinator
+        Task { [weak self, coordinator] in
+            guard await self?.calibrationConfigurationReady(configuration) == true,
+                self?.calibration.accepts(request) == true else { return }
+            do {
+                let verdict = try await coordinator.calibrateThrowing(text, revision: configuration)
+                self?.acceptCalibrationResult(
+                    verdict, source: text, key: sentenceKey, session: session, screen: screen,
+                    request: request, configuration: configuration)
+            } catch {
+                guard self?.calibration.accepts(request) == true,
+                    self?.calibrationGeneration == configuration, self?.enabled == true else { return }
+                if error is CancellationError { return }
+                self?.presentCalibrationFailure(error)
+            }
+        }
+    }
+
+    /// Five-way guard before a calibration card may appear (design 5.2):
+    /// enabled, generation, state token, current route, session identity.
+    private func acceptCalibrationResult(
+        _ verdict: CalibrationVerdict, source: String, key sentenceKey: String,
+        session: InputSessionID, screen: NSScreen?, request: CalibrationState.Request,
+        configuration: UInt64
+    ) {
+        guard enabled, configuration == calibrationGeneration, calibration.accepts(request),
+            input.currentRoute == .calibrate
+        else {
+            DiagnosticLog.write("calibration discarded stale session")
+            return
+        }
+        overlay.showCalibration(
+            verdict, source: source, key: sentenceKey, session: session, anchor: calibration.anchor)
+        DiagnosticLog.write(
+            "calibration result accepted verdict=\(verdict.rating.rawValue) issues=\(verdict.issues.count)")
+    }
+
+    private func presentCalibrationFailure(_ error: any Error) {
+        let message = CalibrationFailureMessage.text(for: error, language: settings.uiLanguage)
+        calibrationFailure = message
+        calibrationFailureNotice.showCalibration(message, language: settings.uiLanguage)
+        DiagnosticLog.write("calibration failed category=\(TranslationErrorDiagnostic(error).kind.rawValue)")
     }
 
     private func translate(
@@ -1043,6 +1226,49 @@ private final class TranslationFailureNotice {
     func hide() {
         dismissal?.cancel(); dismissal = nil
         panel?.close(); panel = nil
+    }
+    /// Independent calibration failure channel (design 4.3, review B-09): its
+    /// own title and its own clear timing, never reusing the translation one.
+    func showCalibration(_ message: String, language: UILanguage) {
+        hide()
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 70),
+            styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.title = "润物 · " + (language == .chinese ? "英文校准失败" : "Calibration Failed")
+        panel.level = .floating
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.frame = NSRect(x: 16, y: 12, width: 328, height: 46)
+        label.isSelectable = false
+        panel.contentView?.addSubview(label)
+        if let screen = NSScreen.main {
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - 180, y: screen.visibleFrame.minY + 104))
+        }
+        self.panel = panel
+        panel.orderFrontRegardless()
+        dismissal = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            self?.hide()
+        }
+    }
+}
+
+/// Calibration failure copy: controlled categories only, never echoing the
+/// sentence or the endpoint (same privacy rule as translation failures).
+enum CalibrationFailureMessage {
+    static func text(for error: any Error, language: UILanguage) -> String {
+        switch error {
+        case LLMTranslationError.noEnabledModels:
+            return language == .chinese
+                ? "未配置启用的语言模型，无法校准。"
+                : "No enabled language model for calibration."
+        case let error as LLMTranslationError:
+            let detail = error.errorDescription ?? ""
+            return language == .chinese ? "英文校准失败：\(detail)" : "Calibration failed: \(detail)"
+        default:
+            return language == .chinese ? "英文校准失败，请稍后重试。" : "Calibration failed. Try again later."
+        }
     }
 }
 

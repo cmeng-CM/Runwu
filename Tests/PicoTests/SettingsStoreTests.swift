@@ -11,6 +11,7 @@ final class SettingsStoreTests: XCTestCase {
         "replaceShortcutKeyCode", "replaceShortcutModifiers", "copyShortcutKeyCode", "copyShortcutModifiers",
         "translationTiming", "translateShortcutKeyCode", "translateShortcutModifiers",
         "sourceLanguage", "targetLanguage", "translationBackend", "llmModels", "llmFallbackTimeout", "historyRetention",
+        "calibrationEnabled",
     ]
 
     func testDisplayNamesAndRenamedBehaviorRawValue() {
@@ -330,6 +331,22 @@ final class SettingsStoreTests: XCTestCase {
             }
         }
     }
+    func testCalibrationEnabledPersistsAndNotifies() {
+        let name = "RunwuSettingsCalibration.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = SettingsStore(defaults: defaults)
+        XCTAssertFalse(settings.calibrationEnabled)  // default off (design D-C8)
+        var notified = 0
+        settings.onCalibrationSettingsChanged = { notified += 1 }
+        settings.calibrationEnabled = true
+        XCTAssertTrue(defaults.bool(forKey: "calibrationEnabled"))
+        XCTAssertEqual(notified, 1)
+        // Fresh store reads the persisted value.
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertTrue(reloaded.calibrationEnabled)
+    }
+
 }
 
 final class SpeechPolicyEvaluatorTests: XCTestCase {

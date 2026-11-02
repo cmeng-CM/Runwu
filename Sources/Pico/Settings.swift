@@ -369,6 +369,14 @@ struct ReplaceShortcut: Equatable, Sendable {
     @Published var translationTiming: TranslationTiming {
         didSet { defaults.set(translationTiming.rawValue, forKey: "translationTiming") }
     }
+    /// 英文输入校准总开关（设计 D-C8）：只影响源语言=中文时的英文路由。
+    @Published var calibrationEnabled: Bool {
+        didSet {
+            defaults.set(calibrationEnabled, forKey: "calibrationEnabled")
+            onCalibrationSettingsChanged?()
+        }
+    }
+    var onCalibrationSettingsChanged: (() -> Void)?
     @Published var speechEnabled: Bool {
         didSet {
             defaults.set(speechEnabled, forKey: "speechEnabled")
@@ -499,6 +507,7 @@ struct ReplaceShortcut: Equatable, Sendable {
         translationTiming =
             TranslationTiming(rawValue: defaults.string(forKey: "translationTiming") ?? TranslationTiming.pause.rawValue)
             ?? .pause
+        calibrationEnabled = defaults.object(forKey: "calibrationEnabled") as? Bool ?? false
         let legacySpeechEnabled = defaults.object(forKey: "speechEnabled") as? Bool ?? false
         let initialSpeechTriggers: SpeechTriggerSelection
         if let storedSpeechTriggers = defaults.object(forKey: "speechTriggers") as? Int {

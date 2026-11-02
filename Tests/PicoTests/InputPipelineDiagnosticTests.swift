@@ -321,6 +321,8 @@ final class InputPipelineDiagnosticTests: XCTestCase {
             weChatVersion: nil, enabled: true, timingRaw: "pause", speedMilliseconds: 450,
             sourceLanguage: "zh", targetLanguage: "en", backendRaw: "local", llmModelCount: 0,
             uiLanguage: "zh", clipboardEnabled: false, clipboardTriggerRaw: "hotkey", excludedBundleIDs: [],
+            calibrationEnabled: false,
+            calibrationPromptVersion: "cal-v1",
             generatedAt: Date())
     }
 }

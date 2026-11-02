@@ -789,6 +789,17 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            SettingsGroup(title: L10n.calibrationSettingsTitle(lang)) {
+                SettingsRow(label: L10n.calibrationSettingsTitle(lang), divider: false) {
+                    Toggle("", isOn: $settings.calibrationEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            }
+            if settings.calibrationEnabled {
+                Text(L10n.calibrationSettingsFooter(lang))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             SettingsGroup(title: L10n.groupLanguagesTitle(lang)) {
                 SettingsRow(label: L10n.sourceLanguage(lang)) {
                     TrailingPicker(width: 160, selection: Binding(
@@ -843,8 +854,18 @@ struct SettingsView: View {
                     }
                 }
             }
-            if settings.translationBackend == .languageModel {
+            if settings.translationBackend == .languageModel || settings.calibrationEnabled {
+                if settings.translationBackend != .languageModel {
+                    Text(L10n.calibrationModelEntryNote(lang))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 modelSettingsSection
+            }
+            if settings.calibrationEnabled
+                && !settings.llmModels.contains(where: { $0.enabled })
+            {
+                Text(L10n.calibrationNoModelsHint(lang))
+                    .font(.caption).foregroundStyle(.orange)
             }
             SettingsGroup(title: L10n.groupActions(lang)) {
                 SettingsRow(label: L10n.replaceOriginal(lang)) {

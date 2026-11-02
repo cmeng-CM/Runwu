@@ -83,7 +83,7 @@ final class TranslationDiagnosticPrivacyTests: XCTestCase {
             weChatVersion: nil, enabled: true, timingRaw: "pause", speedMilliseconds: 450,
             sourceLanguage: "zh", targetLanguage: "en", backendRaw: "languageModel", llmModelCount: 1,
             uiLanguage: "zh", clipboardEnabled: false, clipboardTriggerRaw: "hotkey",
-            excludedBundleIDs: [], generatedAt: Date())
+            excludedBundleIDs: [], calibrationEnabled: false, calibrationPromptVersion: "cal-v1", generatedAt: Date())
     }
 }
 

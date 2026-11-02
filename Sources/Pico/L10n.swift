@@ -386,6 +386,11 @@ enum L10n {
     static func calibrationNoModelsHint(_ lang: UILanguage) -> String {
         lang == .chinese ? "未配置启用的模型" : "No enabled model configured"
     }
+    static func calibrationModelEntryNote(_ lang: UILanguage) -> String {
+        lang == .chinese
+            ? "以下模型同时用于英文输入校准（不改变上方翻译服务）："
+            : "These models also serve English input calibration (the translation service above is unchanged):"
+    }
 
     // MARK: 使用技巧（悬浮窗页）
 
