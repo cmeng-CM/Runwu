@@ -163,18 +163,22 @@ final class CalibrationDecodingTests: XCTestCase {
     // ellipsis-truncated reasons (Rule 4 extension). The version bump rotates
     // the calibration cache so pre-v4 verdicts don't resurface.
     func testCalibrationPromptRequiresCompleteReasonSentences() {
-        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v4")
+        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v5")
         XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("以句号结尾"))
         XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("禁止省略号或半句收尾"))
+        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("不得以省略号结尾"))
         XCTAssertTrue(CalibrationCoordinator.cacheKey(for: "x").hasPrefix(LLMCalibrationPrompt.version + "\u{0}"))
     }
 
-    // cal-v3 shipped a bare hasSuffix("…") guard that a real model response
-    // slipped past; spell out the observed escape hatches as regression cases.
+    // cal-v3 shipped a bare hasSuffix("…") guard that real responses slipped
+    // past twice: first zero-width tails, then the cal-v4 enumerated set still
+    // missed default-ignorable codepoints. Lock in the full escape matrix.
     func testEllipsisDetectionCoversVariantsAndInvisibleSuffixes() {
         XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可…"))
         XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可⋯"))
         XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可…\u{200B}"))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可…\u{FE0F}"))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可…\u{00AD}"))
         XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可\u{FEFF}..."))
         XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可.."))
         XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可．．"))
@@ -182,6 +186,36 @@ final class CalibrationDecodingTests: XCTestCase {
         XCTAssertFalse(CalibrationResponseParser.endsWithEllipsis("读者也可能看不懂。"))
         XCTAssertFalse(CalibrationResponseParser.endsWithEllipsis("读者也可能看不懂"))
         XCTAssertFalse(CalibrationResponseParser.endsWithEllipsis("用 v2.0 版本。"))
+    }
+
+    // Rule 3b: a back translation that trails off fails the response unless
+    // the user's own sentence carries an ellipsis to echo (rule 8: corrected).
+    func testTruncatedBackTranslationFailsUnlessSourceEchoesEllipsis() {
+        XCTAssertThrowsError(
+            try CalibrationResponseParser.parse(
+                content([
+                    "verdict": "good", "back_translation_zh": "你想说的是…", "corrected": source,
+                ]), source: source)
+        ) { error in
+            XCTAssertEqual(error as? CalibrationParseError, .truncatedBackTranslation)
+        }
+        let echo = try? CalibrationResponseParser.parse(
+            content([
+                "verdict": "good", "back_translation_zh": "你想说的是…", "corrected": "I think...",
+            ]), source: "I think...")
+        XCTAssertNotNil(echo)
+    }
+
+    func testTruncatedCorrectedFailsUnlessSourceEchoesEllipsis() {
+        XCTAssertThrowsError(
+            try CalibrationResponseParser.parse(
+                content([
+                    "verdict": "major", "back_translation_zh": "译", "corrected": "Test the vi…",
+                    "issues": [issue("have went", reason: "助动词误用。")],
+                ]), source: source)
+        ) { error in
+            XCTAssertEqual(error as? CalibrationParseError, .truncatedCorrected)
+        }
     }
 
     // Rule 4 extension: an ellipsis-truncated reason drops the whole issue —

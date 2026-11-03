@@ -134,6 +134,8 @@ enum CalibrationParseError: Error, Equatable, CustomStringConvertible {
     case missingBackTranslation
     case issuesRequired
     case correctedRequired
+    case truncatedBackTranslation
+    case truncatedCorrected
 
     var description: String {
         switch self {
@@ -142,6 +144,8 @@ enum CalibrationParseError: Error, Equatable, CustomStringConvertible {
         case .missingBackTranslation: return "back_translation_zh missing or empty"
         case .issuesRequired: return "minor/major requires at least one valid issue"
         case .correctedRequired: return "corrected missing or empty"
+        case .truncatedBackTranslation: return "back_translation_zh trails off with an ellipsis"
+        case .truncatedCorrected: return "corrected trails off with an ellipsis"
         }
     }
 }
@@ -169,6 +173,13 @@ enum CalibrationResponseParser {
         let backTranslation = ((object["back_translation_zh"] as? String) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !backTranslation.isEmpty else { throw CalibrationParseError.missingBackTranslation }
+        // Rule 3b (cal-v5): a back translation that trails off with an
+        // ellipsis is a truncated generation, not a translation — fail over,
+        // unless the user's own sentence has an ellipsis for it to echo.
+        let sourceHasEllipsis = source.contains("…") || source.contains("...")
+        guard sourceHasEllipsis || !Self.endsWithEllipsis(backTranslation) else {
+            throw CalibrationParseError.truncatedBackTranslation
+        }
 
         // Rule 4: filter issues first — quote must be a non-empty exact substring
         // of the source, reason/fix non-empty; unknown kinds fall back to style.
@@ -204,6 +215,10 @@ enum CalibrationResponseParser {
                 "calibration issues dropped=\(dropped) ellipsis=\(ellipsisDropped) capped=\(max(0, candidates.count - validIssues.count))")
         }
         let corrected = ((object["corrected"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // Rule 8 (cal-v5): same truncation guard for the corrected sentence.
+        if !corrected.isEmpty, !sourceHasEllipsis, Self.endsWithEllipsis(corrected) {
+            throw CalibrationParseError.truncatedCorrected
+        }
 
         switch rating {
         case .good:
@@ -234,13 +249,14 @@ enum CalibrationResponseParser {
     /// minor/major verdict, rules 6–7 fail the response and the router fails
     /// over to the next model instead of faking a complete card.
     ///
-    /// Models spell ellipses several ways and sometimes append zero-width
-    /// characters after the dots, so strip invisibles and match the known
-    /// codepoints instead of a bare `hasSuffix("…")` — that narrow check
-    /// shipped first and let a truncated reason onto a real card.
+    /// Real responses escaped the first two cuts of this guard: models append
+    /// invisible characters after the dots (variation selectors, soft hyphen,
+    /// zero-width marks), so strip every default-ignorable scalar — not an
+    /// enumerated set — then match the known ellipsis spellings.
     static func endsWithEllipsis(_ raw: String) -> Bool {
-        let invisibles = CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}")
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: invisibles)
+        let ignorableStripped = String(
+            String.UnicodeScalarView(raw.unicodeScalars.lazy.filter { !$0.properties.isDefaultIgnorableCodePoint }))
+        let text = ignorableStripped.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasSuffix("…") || text.hasSuffix("⋯") || text.hasSuffix("···") { return true }
         guard let last = text.unicodeScalars.last, last == "." || last == "．" else { return false }
         let dots = text.unicodeScalars.reversed().prefix { $0 == "." || $0 == "．" }.count

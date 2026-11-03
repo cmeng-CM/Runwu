@@ -13,16 +13,16 @@ public enum LLMTranslationPrompt {
 /// 4.2, D-C5/D-C13). Kept beside the translation prompt so both stay in one
 /// place; the version participates in the calibration cache key.
 public enum LLMCalibrationPrompt {
-    /// cal-v4: same prompt text as cal-v3; the bump rotates the in-memory
-    /// calibration cache so verdicts parsed before the hardened ellipsis
-    /// guard (a truncated reason slipped through cal-v3) never resurface.
-    public static let version = "cal-v4"
+    /// cal-v5: prompt now also requires a complete back translation; the bump
+    /// rotates the cache so verdicts parsed before the default-ignorable
+    /// hardening of the ellipsis guards never resurface.
+    public static let version = "cal-v5"
     public static let systemPrompt = """
         你是面向中文母语者的英文写作审校。用户会给你一句他们自己写的英文。请评估这句话的语法、搭配、地道性和语义是否清楚，并只返回一个 JSON 对象，不要输出任何其它文字或代码围栏。对象结构：
         {"verdict":"good|minor|major","back_translation_zh":"…","corrected":"…","issues":[{"quote":"…","kind":"grammar|usage|word-choice|spelling|style","reason_zh":"…","fix":"…"}]}
         字段要求：
         - verdict：good=表达到位；minor=有小问题但意思清楚；major=语法或语义错误影响理解。
-        - back_translation_zh：把用户原句（即使有错）按它实际表达的意思译成中文，让用户核对该句是否说了想说的内容；不要基于修正后的句子翻译。
+        - back_translation_zh：把用户原句（即使有错）按它实际表达的意思译成中文，让用户核对该句是否说了想说的内容；不要基于修正后的句子翻译；必须是完整的一句中文，不得以省略号结尾。
         - corrected：整句修正后的英文；verdict 为 good 时与原句相同。
         - issues：最多 5 条，只列影响语义、语法、搭配或地道性的真实问题；quote 必须是原句的精确子串；kind 为问题类型；reason_zh 用一句完整的中文说明原因，以句号结尾；禁止省略号或半句收尾，例如「读者也可…」不合格，应写成「读者也可能看不懂这个说法。」；fix 是替换 quote 的建议。没有可报告的问题时 issues 为空数组。
         """
