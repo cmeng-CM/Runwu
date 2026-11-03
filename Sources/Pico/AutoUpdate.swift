@@ -104,6 +104,11 @@ final class UpdateRedirectGuard: NSObject, URLSessionDelegate, @unchecked Sendab
 /// replaces the installed bundle and relaunches. The replacement carries the
 /// same bundle id and signing certificate, so the accessibility grant and
 /// every setting survive each update.
+///
+/// Runwu local builds keep this whole channel disabled: `isSupported == false`
+/// gates every entry point (startMonitoring / checkManually), so the app never
+/// contacts GitHub for updates. Re-enabling is a product decision that needs a
+/// fresh security review; see README「排错与手动更新」.
 @MainActor
 final class AutoUpdateController: ObservableObject {
     enum Phase: Equatable {

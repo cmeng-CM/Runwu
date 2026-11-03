@@ -42,6 +42,10 @@ struct GitHubLatestRelease: Decodable, Sendable {
     }
 }
 
+/// 手动「检查更新」与版本比较；本类型只被 AutoUpdateController 的更新通道引用，
+/// 而该通道在润物构建中已整体禁用（AutoUpdateController.isSupported = false，
+/// 运行时不向 GitHub 发起任何更新请求）。见 README「排错与手动更新」；
+/// 重新启用前需连同安全审查一起处理。
 struct UpdateChecker: Sendable {
     static let latestReleaseURL = URL(string: "https://api.github.com/repos/cmeng-CM/Runwu/releases/latest")!
     // GitHub API 匿名限流按出口 IP 共享，挂代理时经常 403；releases/latest
