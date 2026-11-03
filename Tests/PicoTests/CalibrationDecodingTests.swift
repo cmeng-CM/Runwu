@@ -157,6 +157,16 @@ final class CalibrationDecodingTests: XCTestCase {
         XCTAssertEqual(verdict.issues.count, 5)
         XCTAssertEqual(verdict.issues.map(\.quote), Array(quotes.prefix(5)))
     }
+
+    // Prompt contract: issue reasons must be complete sentences — concise is
+    // fine, ellipsis / half-sentence endings are not (cal-v2). The version
+    // bump rotates the calibration cache so pre-v2 verdicts don't resurface.
+    func testCalibrationPromptRequiresCompleteReasonSentences() {
+        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v2")
+        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("必须把一句话说完整"))
+        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("不得以省略号或半句收尾"))
+        XCTAssertTrue(CalibrationCoordinator.cacheKey(for: "x").hasPrefix(LLMCalibrationPrompt.version + "\u{0}"))
+    }
 }
 
 /// Engine-level tests for `LLMModelRouter.calibrate` failover and the
