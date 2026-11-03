@@ -158,14 +158,42 @@ final class CalibrationDecodingTests: XCTestCase {
         XCTAssertEqual(verdict.issues.map(\.quote), Array(quotes.prefix(5)))
     }
 
-    // Prompt contract: issue reasons must be complete sentences — concise is
-    // fine, ellipsis / half-sentence endings are not (cal-v2). The version
-    // bump rotates the calibration cache so pre-v2 verdicts don't resurface.
+    // Prompt contract: issue reasons must be complete sentences with a full
+    // stop (cal-v3); the parser additionally drops ellipsis-truncated reasons
+    // (Rule 4 extension). The version bump rotates the calibration cache so
+    // pre-v3 verdicts don't resurface.
     func testCalibrationPromptRequiresCompleteReasonSentences() {
-        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v2")
-        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("必须把一句话说完整"))
-        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("不得以省略号或半句收尾"))
+        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v3")
+        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("以句号结尾"))
+        XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("禁止省略号或半句收尾"))
         XCTAssertTrue(CalibrationCoordinator.cacheKey(for: "x").hasPrefix(LLMCalibrationPrompt.version + "\u{0}"))
+    }
+
+    // Rule 4 extension: an ellipsis-truncated reason drops the whole issue —
+    // the card shows complete sentences or fails over, never half sentences.
+    func testEllipsisTruncatedReasonDropsOnlyThatIssue() throws {
+        let verdict = try CalibrationResponseParser.parse(
+            content([
+                "verdict": "major", "back_translation_zh": "译", "corrected": "c",
+                "issues": [
+                    issue("I", reason: "读者也可…"),
+                    issue("have went", reason: "助动词误用。"),
+                    issue("to", reason: "介词多余..."),
+                ],
+            ]), source: source)
+        XCTAssertEqual(verdict.issues.map(\.quote), ["have went"])
+    }
+
+    func testAllReasonsTruncatedMakesMinorMalformed() {
+        XCTAssertThrowsError(
+            try CalibrationResponseParser.parse(
+                content([
+                    "verdict": "minor", "back_translation_zh": "译", "corrected": "c",
+                    "issues": [issue("have went", reason: "读者也可…")],
+                ]), source: source)
+        ) { error in
+            XCTAssertEqual(error as? CalibrationParseError, .issuesRequired)
+        }
     }
 }
 

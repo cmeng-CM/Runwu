@@ -179,7 +179,9 @@ enum CalibrationResponseParser {
             let quote = ((entry["quote"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let reason = ((entry["reason_zh"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let fix = ((entry["fix"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !quote.isEmpty, !reason.isEmpty, !fix.isEmpty, let range = source.range(of: quote) else {
+            guard !quote.isEmpty, !reason.isEmpty, !fix.isEmpty, !Self.endsWithEllipsis(reason),
+                let range = source.range(of: quote)
+            else {
                 dropped += 1
                 continue
             }
@@ -221,6 +223,15 @@ enum CalibrationResponseParser {
             return CalibrationVerdict(
                 rating: rating, backTranslation: backTranslation, corrected: corrected, issues: validIssues)
         }
+    }
+
+    /// Rule 4 extension (cal-v3): a reason ending in an ellipsis is a half
+    /// sentence the model refused to finish. Drop the whole issue rather than
+    /// show a truncated explanation — "宁可不列，不列半句"; if that empties a
+    /// minor/major verdict, rules 6–7 fail the response and the router fails
+    /// over to the next model instead of faking a complete card.
+    static func endsWithEllipsis(_ text: String) -> Bool {
+        text.hasSuffix("…") || text.hasSuffix("...")
     }
 }
 
