@@ -175,14 +175,17 @@ enum CalibrationResponseParser {
         let rawIssues = object["issues"] as? [[String: Any]] ?? []
         var candidates: [(offset: Int, issue: CalibrationIssue)] = []
         var dropped = 0
+        var ellipsisDropped = 0
         for entry in rawIssues {
             let quote = ((entry["quote"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let reason = ((entry["reason_zh"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let fix = ((entry["fix"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !quote.isEmpty, !reason.isEmpty, !fix.isEmpty, !Self.endsWithEllipsis(reason),
+            let truncated = Self.endsWithEllipsis(reason)
+            guard !quote.isEmpty, !reason.isEmpty, !fix.isEmpty, !truncated,
                 let range = source.range(of: quote)
             else {
                 dropped += 1
+                if truncated { ellipsisDropped += 1 }
                 continue
             }
             let kind = CalibrationIssue.Kind(
@@ -198,7 +201,7 @@ enum CalibrationResponseParser {
         let validIssues = Array(candidates.prefix(5).map(\.issue))
         if dropped > 0 || candidates.count > validIssues.count {
             DiagnosticLog.write(
-                "calibration issues dropped=\(dropped) capped=\(max(0, candidates.count - validIssues.count))")
+                "calibration issues dropped=\(dropped) ellipsis=\(ellipsisDropped) capped=\(max(0, candidates.count - validIssues.count))")
         }
         let corrected = ((object["corrected"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -230,8 +233,18 @@ enum CalibrationResponseParser {
     /// show a truncated explanation — "宁可不列，不列半句"; if that empties a
     /// minor/major verdict, rules 6–7 fail the response and the router fails
     /// over to the next model instead of faking a complete card.
-    static func endsWithEllipsis(_ text: String) -> Bool {
-        text.hasSuffix("…") || text.hasSuffix("...")
+    ///
+    /// Models spell ellipses several ways and sometimes append zero-width
+    /// characters after the dots, so strip invisibles and match the known
+    /// codepoints instead of a bare `hasSuffix("…")` — that narrow check
+    /// shipped first and let a truncated reason onto a real card.
+    static func endsWithEllipsis(_ raw: String) -> Bool {
+        let invisibles = CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}")
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: invisibles)
+        if text.hasSuffix("…") || text.hasSuffix("⋯") || text.hasSuffix("···") { return true }
+        guard let last = text.unicodeScalars.last, last == "." || last == "．" else { return false }
+        let dots = text.unicodeScalars.reversed().prefix { $0 == "." || $0 == "．" }.count
+        return dots >= 2
     }
 }
 

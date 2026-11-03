@@ -159,14 +159,29 @@ final class CalibrationDecodingTests: XCTestCase {
     }
 
     // Prompt contract: issue reasons must be complete sentences with a full
-    // stop (cal-v3); the parser additionally drops ellipsis-truncated reasons
-    // (Rule 4 extension). The version bump rotates the calibration cache so
-    // pre-v3 verdicts don't resurface.
+    // stop (cal-v3 text, v4 cache rotation); the parser additionally drops
+    // ellipsis-truncated reasons (Rule 4 extension). The version bump rotates
+    // the calibration cache so pre-v4 verdicts don't resurface.
     func testCalibrationPromptRequiresCompleteReasonSentences() {
-        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v3")
+        XCTAssertEqual(LLMCalibrationPrompt.version, "cal-v4")
         XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("以句号结尾"))
         XCTAssertTrue(LLMCalibrationPrompt.systemPrompt.contains("禁止省略号或半句收尾"))
         XCTAssertTrue(CalibrationCoordinator.cacheKey(for: "x").hasPrefix(LLMCalibrationPrompt.version + "\u{0}"))
+    }
+
+    // cal-v3 shipped a bare hasSuffix("…") guard that a real model response
+    // slipped past; spell out the observed escape hatches as regression cases.
+    func testEllipsisDetectionCoversVariantsAndInvisibleSuffixes() {
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可…"))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可⋯"))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可…\u{200B}"))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可\u{FEFF}..."))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可.."))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可．．"))
+        XCTAssertTrue(CalibrationResponseParser.endsWithEllipsis("读者也可···"))
+        XCTAssertFalse(CalibrationResponseParser.endsWithEllipsis("读者也可能看不懂。"))
+        XCTAssertFalse(CalibrationResponseParser.endsWithEllipsis("读者也可能看不懂"))
+        XCTAssertFalse(CalibrationResponseParser.endsWithEllipsis("用 v2.0 版本。"))
     }
 
     // Rule 4 extension: an ellipsis-truncated reason drops the whole issue —

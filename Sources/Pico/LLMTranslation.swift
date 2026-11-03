@@ -13,7 +13,10 @@ public enum LLMTranslationPrompt {
 /// 4.2, D-C5/D-C13). Kept beside the translation prompt so both stay in one
 /// place; the version participates in the calibration cache key.
 public enum LLMCalibrationPrompt {
-    public static let version = "cal-v3"
+    /// cal-v4: same prompt text as cal-v3; the bump rotates the in-memory
+    /// calibration cache so verdicts parsed before the hardened ellipsis
+    /// guard (a truncated reason slipped through cal-v3) never resurface.
+    public static let version = "cal-v4"
     public static let systemPrompt = """
         你是面向中文母语者的英文写作审校。用户会给你一句他们自己写的英文。请评估这句话的语法、搭配、地道性和语义是否清楚，并只返回一个 JSON 对象，不要输出任何其它文字或代码围栏。对象结构：
         {"verdict":"good|minor|major","back_translation_zh":"…","corrected":"…","issues":[{"quote":"…","kind":"grammar|usage|word-choice|spelling|style","reason_zh":"…","fix":"…"}]}
