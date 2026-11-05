@@ -7,6 +7,7 @@ xcuserdata/
 *.xcuserstate
 .cursor/
 .agents/
+.delivery/
 .omp/
 Runwu.app/
 润物.app/
